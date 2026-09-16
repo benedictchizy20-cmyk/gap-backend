@@ -71,7 +71,7 @@ app.use(
          * the frontend origin.
          */
 
-        origin: true,
+        origin: "fuelg.netlify.app",
 
         /*
          * IMPORTANT
