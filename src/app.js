@@ -59,31 +59,65 @@ app.use(
 );
 
 
+
+
 /* =========================================================
    CORS
 ========================================================= */
 
+const allowedOrigins = [
+    "http://localhost:5500",
+    "http://127.0.0.1:5500",
+    "https://fuelg.netlify.app"
+];
+
 app.use(
     cors({
 
-        /*
-         * During local development we allow
-         * the frontend origin.
-         */
+        origin: function (origin, callback) {
 
-        origin: "fuelg.netlify.app",
+            /*
+             * Allow requests that do not contain
+             * an Origin header.
+             *
+             * Example:
+             * Postman / server-to-server requests
+             */
+
+            if (!origin) {
+                return callback(null, true);
+            }
+
+            /*
+             * Allow approved frontend origins
+             */
+
+            if (allowedOrigins.includes(origin)) {
+                return callback(null, true);
+            }
+
+            /*
+             * Reject unknown origins
+             */
+
+            return callback(
+                new Error(
+                    "Not allowed by CORS: " + origin
+                )
+            );
+
+        },
 
         /*
          * IMPORTANT
-         * Allows cookies to be sent between
-         * frontend and backend.
+         * Required for FuelGap HttpOnly
+         * authentication cookies.
          */
 
         credentials: true
 
     })
 );
-
 
 /* =========================================================
    COOKIE PARSER
