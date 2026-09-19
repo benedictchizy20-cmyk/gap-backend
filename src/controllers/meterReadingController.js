@@ -25,7 +25,8 @@
 
    ========================================================= */
 
-const { supabaseAdmin } = require("../config/supabaseAdmin");
+// const { supabaseAdmin } = require("../config/supabaseAdmin");
+const supabaseAdmin = require("../config/supabaseAdmin");
 
 
 /* =========================================================
