@@ -1,136 +1,118 @@
 /* =========================================================
    FUELGAP - METER READING CONTROLLER
-   =========================================================
-   PURPOSE:
-   - Create meter readings
-   - Validate station / pump / nozzle relationships
-   - Validate user permissions
-   - Support current and historical readings
-   - Support opening / periodic / closing / correction
-   - Evidence photo is OPTIONAL
-   - Support captured_at historical date/time
-   - Get organization meter readings
-   - Get one meter reading
-   - Delete meter readings
-
-   DATABASE:
-   Supabase
-
-   AUTHENTICATION:
-   req.user.id = Supabase Auth User ID
-
-   IMPORTANT:
-   This controller does NOT calculate the fuel gap.
-   It only records and manages meter readings.
-
+   PRODUCTION VERSION
    ========================================================= */
 
-// const { supabaseAdmin } = require("../config/supabaseAdmin");
 const supabaseAdmin = require("../config/supabaseAdmin");
 
 
 /* =========================================================
-   HELPER
    GET APPLICATION USER
    ========================================================= */
 
 async function getApplicationUser(authUserId) {
 
-    if (!authUserId) {
-        return {
-            user: null,
-            error: new Error("Authentication user ID is missing.")
-        };
-    }
-
     const { data, error } = await supabaseAdmin
         .from("users")
         .select(`
             id,
+            auth_user_id,
             organization_id,
             full_name,
             email,
             phone,
             role,
             is_active,
-            auth_user_id,
             station_id
         `)
         .eq("auth_user_id", authUserId)
         .maybeSingle();
 
     if (error) {
+
         console.error(
-            "METER READING - APPLICATION USER ERROR:",
+            "GET APPLICATION USER ERROR:",
             error
         );
 
-        return {
-            user: null,
-            error
-        };
+        throw new Error(error.message);
     }
 
-    if (!data) {
-        return {
-            user: null,
-            error: new Error(
-                "FuelGap application user profile was not found."
-            )
-        };
-    }
-
-    return {
-        user: data,
-        error: null
-    };
+    return data;
 }
 
 
 /* =========================================================
-   HELPER
-   CHECK HISTORICAL DATE
+   CHECK ORGANIZATION-WIDE ROLE
    ========================================================= */
 
-function isHistoricalReading(capturedAt) {
+function isOrganizationWideRole(role) {
 
-    if (!capturedAt) {
-        return false;
-    }
+    return [
+        "owner",
+        "admin",
+        "super_admin"
+    ].includes(role);
 
-    const suppliedDate = new Date(capturedAt);
-
-    if (Number.isNaN(suppliedDate.getTime())) {
-        return false;
-    }
-
-    const now = new Date();
-
-    const suppliedYear = suppliedDate.getFullYear();
-    const suppliedMonth = suppliedDate.getMonth();
-    const suppliedDay = suppliedDate.getDate();
-
-    const currentYear = now.getFullYear();
-    const currentMonth = now.getMonth();
-    const currentDay = now.getDate();
-
-    return (
-        suppliedYear < currentYear ||
-        (
-            suppliedYear === currentYear &&
-            suppliedMonth < currentMonth
-        ) ||
-        (
-            suppliedYear === currentYear &&
-            suppliedMonth === currentMonth &&
-            suppliedDay < currentDay
-        )
-    );
 }
 
 
 /* =========================================================
-   HELPER
+   CHECK STATION-RESTRICTED ROLE
+   ========================================================= */
+
+function isStationRestrictedRole(role) {
+
+    return [
+        "manager",
+        "staff",
+        "attendant"
+    ].includes(role);
+
+}
+
+
+/* =========================================================
+   CHECK USER STATION ACCESS
+   ========================================================= */
+
+function userCanAccessStation(appUser, stationId) {
+
+    if (!appUser) {
+        return false;
+    }
+
+
+    /*
+       Organization-wide users can access
+       stations belonging to their organization.
+    */
+
+    if (isOrganizationWideRole(appUser.role)) {
+        return true;
+    }
+
+
+    /*
+       Station-restricted users must have
+       a station assigned.
+    */
+
+    if (isStationRestrictedRole(appUser.role)) {
+
+        if (!appUser.station_id) {
+            return false;
+        }
+
+        return appUser.station_id === stationId;
+    }
+
+
+    return false;
+}
+
+
+/* =========================================================
    NORMALIZE READING TYPE
    ========================================================= */
 
@@ -143,7 +125,20 @@ function normalizeReadingType(value) {
     return String(value)
         .trim()
         .toLowerCase();
+
 }
+
+
+/* =========================================================
+   VALID READING TYPES
+   ========================================================= */
+
+const VALID_READING_TYPES = [
+    "opening",
+    "periodic",
+    "closing",
+    "correction"
+];
 
 
 /* =========================================================
@@ -154,101 +149,77 @@ async function createMeterReading(req, res) {
 
     try {
 
-        console.log(
-            "================================================="
-        );
-
-        console.log(
-            "FUELGAP - CREATE METER READING"
-        );
-
-        console.log(
-            "================================================="
-        );
+        console.log("==========================================");
+        console.log("FUELGAP - CREATE METER READING");
+        console.log("==========================================");
 
 
         /* =====================================================
-           1. CHECK AUTHENTICATION
+           AUTHENTICATION
         ===================================================== */
 
         if (!req.user || !req.user.id) {
 
-            console.warn(
-                "METER READING: Authentication required."
-            );
-
             return res.status(401).json({
                 success: false,
-                message: "Authentication required."
+                message: "Authentication required"
             });
+
         }
 
 
         console.log(
-            "Authenticated user:",
+            "AUTHENTICATED USER:",
             req.user.id
         );
 
 
         /* =====================================================
-           2. GET APPLICATION USER
+           APPLICATION USER
         ===================================================== */
 
-        const {
-            user: appUser,
-            error: userError
-        } = await getApplicationUser(req.user.id);
+        const appUser =
+            await getApplicationUser(req.user.id);
 
 
-        if (userError || !appUser) {
-
-            console.error(
-                "METER READING: Application user error:",
-                userError
-            );
+        if (!appUser) {
 
             return res.status(404).json({
                 success: false,
-                message: "FuelGap user profile not found.",
-                error: userError
-                    ? userError.message
-                    : null
+                message:
+                    "Application user profile not found"
             });
+
         }
 
-
-        console.log(
-            "FuelGap user:",
-            appUser.full_name
-        );
-
-        console.log(
-            "Role:",
-            appUser.role
-        );
-
-        console.log(
-            "Organization:",
-            appUser.organization_id
-        );
-
-
-        /* =====================================================
-           3. CHECK ACCOUNT STATUS
-        ===================================================== */
 
         if (appUser.is_active === false) {
 
             return res.status(403).json({
                 success: false,
                 message:
-                    "Your FuelGap account is inactive. Contact an administrator."
+                    "Your account is inactive"
             });
+
         }
 
 
+        console.log(
+            "APPLICATION USER:",
+            {
+                id: appUser.id,
+                organization_id:
+                    appUser.organization_id,
+                station_id:
+                    appUser.station_id,
+                role:
+                    appUser.role
+            }
+        );
+
+
         /* =====================================================
-           4. GET REQUEST BODY
+           REQUEST DATA
         ===================================================== */
 
         const {
@@ -260,26 +231,11 @@ async function createMeterReading(req, res) {
             shift_id,
             photo_url,
             captured_at
-        } = req.body || {};
-
-
-        console.log(
-            "Meter reading request:",
-            {
-                station_id,
-                pump_id,
-                nozzle_id,
-                reading_type,
-                reading,
-                shift_id,
-                has_photo: Boolean(photo_url),
-                captured_at
-            }
-        );
+        } = req.body;
 
 
         /* =====================================================
-           5. REQUIRED FIELD VALIDATION
+           REQUIRED FIELDS
         ===================================================== */
 
         if (
@@ -288,36 +244,28 @@ async function createMeterReading(req, res) {
             !nozzle_id ||
             !reading_type ||
             reading === undefined ||
-            reading === null ||
-            reading === ""
+            reading === null
         ) {
 
             return res.status(400).json({
                 success: false,
                 message:
-                    "Station, pump, nozzle, reading type and reading are required."
+                    "Station, pump, nozzle, reading type and reading are required"
             });
+
         }
 
 
         /* =====================================================
-           6. NORMALIZE READING TYPE
+           READING TYPE
         ===================================================== */
 
         const normalizedReadingType =
             normalizeReadingType(reading_type);
 
 
-        const allowedReadingTypes = [
-            "opening",
-            "periodic",
-            "closing",
-            "correction"
-        ];
-
-
         if (
-            !allowedReadingTypes.includes(
+            !VALID_READING_TYPES.includes(
                 normalizedReadingType
             )
         ) {
@@ -325,39 +273,48 @@ async function createMeterReading(req, res) {
             return res.status(400).json({
                 success: false,
                 message:
-                    "Invalid reading type. Allowed values are opening, periodic, closing and correction."
+                    "Invalid reading type. Allowed values: opening, periodic, closing, correction"
             });
+
         }
 
 
         /* =====================================================
-           7. VALIDATE METER READING NUMBER
+           READING VALUE
         ===================================================== */
 
         const numericReading =
             Number(reading);
 
 
-        if (
-            !Number.isFinite(numericReading) ||
-            numericReading < 0
-        ) {
+        if (!Number.isFinite(numericReading)) {
 
             return res.status(400).json({
                 success: false,
                 message:
-                    "Meter reading must be a valid number greater than or equal to zero."
+                    "Meter reading must be a valid number"
             });
+
+        }
+
+
+        if (numericReading < 0) {
+
+            return res.status(400).json({
+                success: false,
+                message:
+                    "Meter reading cannot be negative"
+            });
+
         }
 
 
         /* =====================================================
-           8. VALIDATE CAPTURED DATE/TIME
-        ===================================================== */
+           CAPTURED DATE
+           ===================================================== */
 
-        let finalCapturedAt = new Date().toISOString();
-
-        let historicalReading = false;
+        let finalCapturedAt =
+            new Date();
 
 
         if (captured_at) {
@@ -375,35 +332,19 @@ async function createMeterReading(req, res) {
                 return res.status(400).json({
                     success: false,
                     message:
-                        "The reading date and time is invalid."
+                        "Invalid captured_at date"
                 });
+
             }
 
 
             finalCapturedAt =
-                parsedCapturedAt.toISOString();
-
-
-            historicalReading =
-                isHistoricalReading(
-                    parsedCapturedAt
-                );
+                parsedCapturedAt;
         }
 
 
-        console.log(
-            "Captured at:",
-            finalCapturedAt
-        );
-
-        console.log(
-            "Historical reading:",
-            historicalReading
-        );
-
-
         /* =====================================================
-           9. FIND STATION
+           STATION
         ===================================================== */
 
         const {
@@ -415,32 +356,25 @@ async function createMeterReading(req, res) {
                 id,
                 organization_id,
                 name,
-                address,
-                city,
-                state,
                 status
             `)
             .eq("id", station_id)
-            .eq(
-                "organization_id",
-                appUser.organization_id
-            )
             .maybeSingle();
 
 
         if (stationError) {
 
             console.error(
-                "METER READING - STATION ERROR:",
+                "CREATE READING STATION ERROR:",
                 stationError
             );
 
             return res.status(500).json({
                 success: false,
                 message:
-                    "Unable to verify the station.",
-                error: stationError.message
+                    "Unable to verify station"
             });
+
         }
 
 
@@ -449,69 +383,72 @@ async function createMeterReading(req, res) {
             return res.status(404).json({
                 success: false,
                 message:
-                    "Station not found or does not belong to your organization."
+                    "Station not found"
             });
+
         }
 
 
         /* =====================================================
-           10. CHECK STATION STATUS
+           ORGANIZATION SECURITY
         ===================================================== */
 
         if (
-            station.status &&
-            String(station.status).toLowerCase() ===
-            "inactive"
-        ) {
-
-            return res.status(400).json({
-                success: false,
-                message:
-                    "This station is inactive."
-            });
-        }
-
-
-        /* =====================================================
-           11. CHECK STATION ACCESS
-        ===================================================== */
-
-        const userRole =
-            String(
-                appUser.role || ""
-            ).toLowerCase();
-
-
-        const organizationWideRoles = [
-            "owner",
-            "admin",
-            "super_admin"
-        ];
-
-
-        const hasOrganizationWideAccess =
-            organizationWideRoles.includes(
-                userRole
-            );
-
-
-        if (
-            !hasOrganizationWideAccess &&
-            appUser.station_id &&
-            String(appUser.station_id) !==
-            String(station_id)
+            !appUser.organization_id ||
+            station.organization_id !==
+                appUser.organization_id
         ) {
 
             return res.status(403).json({
                 success: false,
                 message:
-                    "You are not allowed to record meter readings for this station."
+                    "You do not have access to this station"
             });
+
         }
 
 
         /* =====================================================
-           12. FIND PUMP
+           STATION STATUS
+        ===================================================== */
+
+        if (
+            station.status &&
+            String(station.status).toLowerCase() ===
+                "inactive"
+        ) {
+
+            return res.status(400).json({
+                success: false,
+                message:
+                    "This station is inactive"
+            });
+
+        }
+
+
+        /* =====================================================
+           STATION ASSIGNMENT SECURITY
+        ===================================================== */
+
+        if (
+            !userCanAccessStation(
+                appUser,
+                station_id
+            )
+        ) {
+
+            return res.status(403).json({
+                success: false,
+                message:
+                    "You are not assigned to this station"
+            });
+
+        }
+
+
+        /* =====================================================
+           PUMP
         ===================================================== */
 
         const {
@@ -528,23 +465,22 @@ async function createMeterReading(req, res) {
                 status
             `)
             .eq("id", pump_id)
-            .eq("station_id", station_id)
             .maybeSingle();
 
 
         if (pumpError) {
 
             console.error(
-                "METER READING - PUMP ERROR:",
+                "CREATE READING PUMP ERROR:",
                 pumpError
             );
 
             return res.status(500).json({
                 success: false,
                 message:
-                    "Unable to verify the pump.",
-                error: pumpError.message
+                    "Unable to verify pump"
             });
+
         }
 
 
@@ -553,31 +489,43 @@ async function createMeterReading(req, res) {
             return res.status(404).json({
                 success: false,
                 message:
-                    "Pump not found or does not belong to the selected station."
+                    "Pump not found"
             });
+
         }
 
 
-        /* =====================================================
-           13. CHECK PUMP STATUS
-        ===================================================== */
-
         if (
-            pump.status &&
-            String(pump.status).toLowerCase() ===
-            "inactive"
+            pump.station_id !==
+            station_id
         ) {
 
             return res.status(400).json({
                 success: false,
                 message:
-                    "This pump is inactive."
+                    "The selected pump does not belong to this station"
             });
+
+        }
+
+
+        if (
+            pump.status &&
+            String(pump.status).toLowerCase() ===
+                "inactive"
+        ) {
+
+            return res.status(400).json({
+                success: false,
+                message:
+                    "This pump is inactive"
+            });
+
         }
 
 
         /* =====================================================
-           14. FIND NOZZLE
+           NOZZLE
         ===================================================== */
 
         const {
@@ -594,23 +542,22 @@ async function createMeterReading(req, res) {
                 status
             `)
             .eq("id", nozzle_id)
-            .eq("pump_id", pump_id)
             .maybeSingle();
 
 
         if (nozzleError) {
 
             console.error(
-                "METER READING - NOZZLE ERROR:",
+                "CREATE READING NOZZLE ERROR:",
                 nozzleError
             );
 
             return res.status(500).json({
                 success: false,
                 message:
-                    "Unable to verify the nozzle.",
-                error: nozzleError.message
+                    "Unable to verify nozzle"
             });
+
         }
 
 
@@ -619,40 +566,52 @@ async function createMeterReading(req, res) {
             return res.status(404).json({
                 success: false,
                 message:
-                    "Nozzle not found or does not belong to the selected pump."
+                    "Nozzle not found"
             });
+
         }
 
 
-        /* =====================================================
-           15. CHECK NOZZLE STATUS
-        ===================================================== */
-
         if (
-            nozzle.status &&
-            String(nozzle.status).toLowerCase() ===
-            "inactive"
+            nozzle.pump_id !==
+            pump_id
         ) {
 
             return res.status(400).json({
                 success: false,
                 message:
-                    "This nozzle is inactive."
+                    "The selected nozzle does not belong to this pump"
             });
+
+        }
+
+
+        if (
+            nozzle.status &&
+            String(nozzle.status).toLowerCase() ===
+                "inactive"
+        ) {
+
+            return res.status(400).json({
+                success: false,
+                message:
+                    "This nozzle is inactive"
+            });
+
         }
 
 
         /* =====================================================
-           16. VERIFY SHIFT IF PROVIDED
+           SHIFT VALIDATION
         ===================================================== */
 
-        let shift = null;
+        let finalShiftId = null;
 
 
         if (shift_id) {
 
             const {
-                data: foundShift,
+                data: shift,
                 error: shiftError
             } = await supabaseAdmin
                 .from("shifts")
@@ -663,169 +622,128 @@ async function createMeterReading(req, res) {
                     shift_date,
                     start_time,
                     end_shift,
-                    status,
-                    created_at
+                    status
                 `)
                 .eq("id", shift_id)
-                .eq("station_id", station_id)
                 .maybeSingle();
 
 
             if (shiftError) {
 
                 console.error(
-                    "METER READING - SHIFT ERROR:",
+                    "CREATE READING SHIFT ERROR:",
                     shiftError
                 );
 
                 return res.status(500).json({
                     success: false,
                     message:
-                        "Unable to verify the shift.",
-                    error: shiftError.message
+                        "Unable to verify shift"
                 });
+
             }
 
 
-            if (!foundShift) {
+            if (!shift) {
 
                 return res.status(404).json({
                     success: false,
                     message:
-                        "Shift not found or does not belong to the selected station."
+                        "Shift not found"
                 });
+
             }
 
-
-            shift = foundShift;
-
-
-            /* =================================================
-               SHIFT STATUS
-            ================================================= */
-
-            const shiftStatus =
-                String(
-                    shift.status || ""
-                ).toLowerCase();
-
-
-            const shiftIsOpen =
-                shiftStatus === "open";
-
-
-            const shiftIsClosed =
-                shiftStatus === "closed";
-
-
-            /* =================================================
-               CORRECTION READINGS
-               CAN USE OPEN OR CLOSED SHIFTS
-            ================================================= */
 
             if (
-                normalizedReadingType ===
-                "correction"
+                shift.station_id !==
+                station_id
             ) {
 
-                if (
-                    !shiftIsOpen &&
-                    !shiftIsClosed
-                ) {
+                return res.status(400).json({
+                    success: false,
+                    message:
+                        "The selected shift does not belong to this station"
+                });
 
-                    return res.status(400).json({
-                        success: false,
-                        message:
-                            "A correction reading must belong to an open or closed shift."
-                    });
-                }
             }
 
 
-            /* =================================================
-               CURRENT NORMAL READINGS
-               MUST USE OPEN SHIFT
-            ================================================= */
+            const shiftStatus =
+                shift.status
+                    ? String(
+                        shift.status
+                    ).toLowerCase()
+                    : "";
 
-            else if (!historicalReading) {
 
-                if (!shiftIsOpen) {
+            if (
+                normalizedReadingType !==
+                    "correction" &&
+                shiftStatus &&
+                ![
+                    "open",
+                    "active",
+                    "ongoing",
+                    "closed",
+                    "completed"
+                ].includes(
+                    shiftStatus
+                )
+            ) {
 
-                    return res.status(400).json({
-                        success: false,
-                        message:
-                            "Current opening, periodic and closing readings must belong to an open shift."
-                    });
-                }
+                return res.status(400).json({
+                    success: false,
+                    message:
+                        "The selected shift is not available for meter readings"
+                });
+
             }
 
 
-            /* =================================================
-               HISTORICAL NORMAL READINGS
-               MAY USE CLOSED SHIFT
-            ================================================= */
-
-            else {
-
-                if (
-                    !shiftIsOpen &&
-                    !shiftIsClosed
-                ) {
-
-                    return res.status(400).json({
-                        success: false,
-                        message:
-                            "Historical readings must belong to an open or closed shift."
-                    });
-                }
-            }
+            finalShiftId =
+                shift.id;
         }
 
 
         /* =====================================================
-           17. OPTIONAL PHOTO EVIDENCE
+           PHOTO URL
         ===================================================== */
 
         let finalPhotoUrl = null;
 
 
-        if (
-            photo_url !== undefined &&
-            photo_url !== null &&
-            String(photo_url).trim() !== ""
-        ) {
+        if (photo_url) {
 
             finalPhotoUrl =
                 String(photo_url).trim();
+
+
+            if (
+                finalPhotoUrl.length === 0
+            ) {
+
+                finalPhotoUrl = null;
+
+            }
+
         }
 
 
-        /*
-         * IMPORTANT:
-         *
-         * Evidence is OPTIONAL.
-         *
-         * Therefore:
-         *
-         * photo_url = null
-         *
-         * is completely valid.
-         */
-
-
         /* =====================================================
-           18. PREPARE DATABASE RECORD
+           INSERT DATA
         ===================================================== */
 
-        const meterReadingRecord = {
+        const insertData = {
 
-            station_id: station_id,
+            station_id,
 
-            pump_id: pump_id,
+            pump_id,
 
-            nozzle_id: nozzle_id,
+            nozzle_id,
 
-            recorded_by: appUser.id,
+            recorded_by:
+                appUser.id,
 
             reading_type:
                 normalizedReadingType,
@@ -834,50 +752,25 @@ async function createMeterReading(req, res) {
                 numericReading,
 
             shift_id:
-                shift_id || null,
+                finalShiftId,
 
             photo_url:
                 finalPhotoUrl,
 
             captured_at:
-                finalCapturedAt
+                finalCapturedAt.toISOString()
+
         };
 
 
         console.log(
-            "METER READING - INSERT RECORD:",
-            {
-                station_id:
-                    meterReadingRecord.station_id,
-
-                pump_id:
-                    meterReadingRecord.pump_id,
-
-                nozzle_id:
-                    meterReadingRecord.nozzle_id,
-
-                reading_type:
-                    meterReadingRecord.reading_type,
-
-                reading:
-                    meterReadingRecord.reading,
-
-                shift_id:
-                    meterReadingRecord.shift_id,
-
-                has_photo:
-                    Boolean(
-                        meterReadingRecord.photo_url
-                    ),
-
-                captured_at:
-                    meterReadingRecord.captured_at
-            }
+            "CREATING METER READING:",
+            insertData
         );
 
 
         /* =====================================================
-           19. INSERT INTO SUPABASE
+           INSERT READING
         ===================================================== */
 
         const {
@@ -885,9 +778,7 @@ async function createMeterReading(req, res) {
             error: insertError
         } = await supabaseAdmin
             .from("meter_readings")
-            .insert([
-                meterReadingRecord
-            ])
+            .insert(insertData)
             .select(`
                 id,
                 station_id,
@@ -907,22 +798,18 @@ async function createMeterReading(req, res) {
         if (insertError) {
 
             console.error(
-                "METER READING - INSERT ERROR:",
+                "CREATE METER READING DATABASE ERROR:",
                 insertError
             );
 
             return res.status(500).json({
                 success: false,
                 message:
-                    "Failed to save meter reading.",
-                error: insertError.message
+                    "Unable to create meter reading"
             });
+
         }
 
-
-        /* =====================================================
-           20. SUCCESS RESPONSE
-        ===================================================== */
 
         console.log(
             "METER READING CREATED:",
@@ -935,36 +822,31 @@ async function createMeterReading(req, res) {
             success: true,
 
             message:
-                historicalReading
-                    ? (
-                        finalPhotoUrl
-                            ? "Historical meter reading saved with evidence."
-                            : "Historical meter reading saved without evidence."
-                    )
-                    : (
-                        finalPhotoUrl
-                            ? "Meter reading saved with evidence."
-                            : "Meter reading saved without evidence."
-                    ),
+                "Meter reading created successfully",
 
-            data: createdReading
+            data:
+                createdReading
+
         });
-
 
     } catch (error) {
 
         console.error(
-            "METER READING CREATE UNEXPECTED ERROR:",
+            "CREATE METER READING UNEXPECTED ERROR:",
             error
         );
 
         return res.status(500).json({
+
             success: false,
+
             message:
-                "An unexpected error occurred while creating the meter reading.",
-            error: error.message
+                "Unexpected error while creating meter reading"
+
         });
+
     }
+
 }
 
 
@@ -976,13 +858,13 @@ async function getMeterReadings(req, res) {
 
     try {
 
-        console.log(
-            "FUELGAP - GET METER READINGS"
-        );
+        console.log("==========================================");
+        console.log("FUELGAP - GET METER READINGS");
+        console.log("==========================================");
 
 
         /* =====================================================
-           1. AUTHENTICATION
+           AUTHENTICATION
         ===================================================== */
 
         if (!req.user || !req.user.id) {
@@ -990,54 +872,57 @@ async function getMeterReadings(req, res) {
             return res.status(401).json({
                 success: false,
                 message:
-                    "Authentication required."
+                    "Authentication required"
             });
+
         }
 
 
-        /* =====================================================
-           2. APPLICATION USER
-        ===================================================== */
-
-        const {
-            user: appUser,
-            error: userError
-        } = await getApplicationUser(
+        console.log(
+            "AUTHENTICATED USER:",
             req.user.id
         );
 
 
-        if (userError || !appUser) {
+        /* =====================================================
+           APPLICATION USER
+        ===================================================== */
+
+        const appUser =
+            await getApplicationUser(
+                req.user.id
+            );
+
+
+        if (!appUser) {
 
             return res.status(404).json({
                 success: false,
                 message:
-                    "FuelGap user profile not found."
+                    "Application user profile not found"
             });
+
         }
 
-
-        /* =====================================================
-           3. CHECK ACTIVE USER
-        ===================================================== */
 
         if (appUser.is_active === false) {
 
             return res.status(403).json({
                 success: false,
                 message:
-                    "Your FuelGap account is inactive."
+                    "Your account is inactive"
             });
+
         }
 
 
         /* =====================================================
-           4. GET ORGANIZATION STATIONS
+           ORGANIZATION STATIONS
         ===================================================== */
 
         const {
-            data: organizationStations,
-            error: stationsError
+            data: stations,
+            error: stationError
         } = await supabaseAdmin
             .from("stations")
             .select("id")
@@ -1047,49 +932,108 @@ async function getMeterReadings(req, res) {
             );
 
 
-        if (stationsError) {
+        if (stationError) {
 
             console.error(
-                "GET METER READINGS - STATIONS ERROR:",
-                stationsError
+                "GET METER READINGS STATIONS ERROR:",
+                stationError
             );
 
             return res.status(500).json({
                 success: false,
                 message:
-                    "Unable to load organization stations.",
-                error: stationsError.message
+                    "Unable to load organization stations"
             });
+
         }
 
 
-        const stationIds =
-            (organizationStations || [])
-                .map(station => station.id);
+        const organizationStationIds =
+            (stations || [])
+                .map(
+                    station => station.id
+                );
 
 
-        /* =====================================================
-           NO STATIONS
-        ===================================================== */
-
-        if (stationIds.length === 0) {
+        if (
+            organizationStationIds.length ===
+            0
+        ) {
 
             return res.status(200).json({
 
                 success: true,
 
-                data: [],
+                count: 0,
 
-                count: 0
+                data: []
+
             });
+
         }
 
 
         /* =====================================================
-           5. BUILD QUERY
+           STATION ACCESS
         ===================================================== */
 
-        let query = supabaseAdmin
+        let allowedStationIds =
+            organizationStationIds;
+
+
+        if (
+            isStationRestrictedRole(
+                appUser.role
+            )
+        ) {
+
+            if (!appUser.station_id) {
+
+                return res.status(403).json({
+
+                    success: false,
+
+                    message:
+                        "Your account is not assigned to a station"
+
+                });
+
+            }
+
+
+            if (
+                !organizationStationIds.includes(
+                    appUser.station_id
+                )
+            ) {
+
+                return res.status(403).json({
+
+                    success: false,
+
+                    message:
+                        "Your assigned station does not belong to your organization"
+
+                });
+
+            }
+
+
+            allowedStationIds = [
+                appUser.station_id
+            ];
+
+        }
+
+
+        /* =====================================================
+           GET READINGS
+        ===================================================== */
+
+        const {
+            data,
+            error
+        } = await supabaseAdmin
             .from("meter_readings")
             .select(`
                 id,
@@ -1106,7 +1050,7 @@ async function getMeterReadings(req, res) {
             `)
             .in(
                 "station_id",
-                stationIds
+                allowedStationIds
             )
             .order(
                 "captured_at",
@@ -1116,78 +1060,43 @@ async function getMeterReadings(req, res) {
             );
 
 
-        /* =====================================================
-           6. STAFF / ATTENDANT STATION FILTER
-        ===================================================== */
-
-        const userRole =
-            String(
-                appUser.role || ""
-            ).toLowerCase();
-
-
-        const stationRestrictedRoles = [
-            "staff",
-            "attendant",
-            "manager"
-        ];
-
-
-        if (
-            stationRestrictedRoles.includes(
-                userRole
-            ) &&
-            appUser.station_id
-        ) {
-
-            query = query.eq(
-                "station_id",
-                appUser.station_id
-            );
-        }
-
-
-        /* =====================================================
-           7. EXECUTE QUERY
-        ===================================================== */
-
-        const {
-            data: readings,
-            error: readingsError
-        } = await query;
-
-
-        if (readingsError) {
+        if (error) {
 
             console.error(
-                "GET METER READINGS ERROR:",
-                readingsError
+                "GET METER READINGS DATABASE ERROR:",
+                error
             );
 
             return res.status(500).json({
                 success: false,
                 message:
-                    "Failed to load meter readings.",
-                error: readingsError.message
+                    "Unable to load meter readings"
             });
+
         }
 
 
-        /* =====================================================
-           8. SUCCESS
-        ===================================================== */
+        console.log(
+            "METER READINGS FOUND:",
+            data
+                ? data.length
+                : 0
+        );
+
 
         return res.status(200).json({
 
             success: true,
 
-            data:
-                readings || [],
-
             count:
-                (readings || []).length
-        });
+                data
+                    ? data.length
+                    : 0,
 
+            data:
+                data || []
+
+        });
 
     } catch (error) {
 
@@ -1197,12 +1106,16 @@ async function getMeterReadings(req, res) {
         );
 
         return res.status(500).json({
+
             success: false,
+
             message:
-                "An unexpected error occurred while loading meter readings.",
-            error: error.message
+                "Unexpected error while loading meter readings"
+
         });
+
     }
+
 }
 
 
@@ -1214,13 +1127,13 @@ async function getMeterReadingById(req, res) {
 
     try {
 
-        console.log(
-            "FUELGAP - GET SINGLE METER READING"
-        );
+        console.log("==========================================");
+        console.log("FUELGAP - GET SINGLE METER READING");
+        console.log("==========================================");
 
 
         /* =====================================================
-           1. AUTHENTICATION
+           AUTHENTICATION
         ===================================================== */
 
         if (!req.user || !req.user.id) {
@@ -1228,35 +1141,42 @@ async function getMeterReadingById(req, res) {
             return res.status(401).json({
                 success: false,
                 message:
-                    "Authentication required."
+                    "Authentication required"
             });
+
         }
 
 
-        /* =====================================================
-           2. GET APPLICATION USER
-        ===================================================== */
-
-        const {
-            user: appUser,
-            error: userError
-        } = await getApplicationUser(
-            req.user.id
-        );
+        const appUser =
+            await getApplicationUser(
+                req.user.id
+            );
 
 
-        if (userError || !appUser) {
+        if (!appUser) {
 
             return res.status(404).json({
                 success: false,
                 message:
-                    "FuelGap user profile not found."
+                    "Application user profile not found"
             });
+
+        }
+
+
+        if (appUser.is_active === false) {
+
+            return res.status(403).json({
+                success: false,
+                message:
+                    "Your account is inactive"
+            });
+
         }
 
 
         /* =====================================================
-           3. GET READING ID
+           READING ID
         ===================================================== */
 
         const readingId =
@@ -1268,13 +1188,14 @@ async function getMeterReadingById(req, res) {
             return res.status(400).json({
                 success: false,
                 message:
-                    "Meter reading ID is required."
+                    "Meter reading ID is required"
             });
+
         }
 
 
         /* =====================================================
-           4. GET READING
+           GET READING
         ===================================================== */
 
         const {
@@ -1295,7 +1216,10 @@ async function getMeterReadingById(req, res) {
                 captured_at,
                 created_at
             `)
-            .eq("id", readingId)
+            .eq(
+                "id",
+                readingId
+            )
             .maybeSingle();
 
 
@@ -1309,9 +1233,9 @@ async function getMeterReadingById(req, res) {
             return res.status(500).json({
                 success: false,
                 message:
-                    "Unable to load meter reading.",
-                error: readingError.message
+                    "Unable to load meter reading"
             });
+
         }
 
 
@@ -1320,13 +1244,278 @@ async function getMeterReadingById(req, res) {
             return res.status(404).json({
                 success: false,
                 message:
-                    "Meter reading not found."
+                    "Meter reading not found"
             });
+
         }
 
 
         /* =====================================================
-           5. CHECK STATION BELONGS TO ORGANIZATION
+           GET STATION
+        ===================================================== */
+
+        const {
+            data: station,
+            error: stationError
+        } = await supabaseAdmin
+            .from("stations")
+            .select(`
+                id,
+                organization_id,
+                name
+            `)
+            .eq(
+                "id",
+                reading.station_id
+            )
+            .maybeSingle();
+
+
+        if (stationError) {
+
+            console.error(
+                "GET SINGLE READING STATION ERROR:",
+                stationError
+            );
+
+            return res.status(500).json({
+                success: false,
+                message:
+                    "Unable to verify station"
+            });
+
+        }
+
+
+        if (!station) {
+
+            return res.status(404).json({
+                success: false,
+                message:
+                    "Reading station not found"
+            });
+
+        }
+
+
+        /* =====================================================
+           ORGANIZATION SECURITY
+        ===================================================== */
+
+        if (
+            station.organization_id !==
+            appUser.organization_id
+        ) {
+
+            return res.status(403).json({
+                success: false,
+                message:
+                    "You do not have access to this reading"
+            });
+
+        }
+
+
+        /* =====================================================
+           STATION SECURITY
+        ===================================================== */
+
+        if (
+            !userCanAccessStation(
+                appUser,
+                reading.station_id
+            )
+        ) {
+
+            return res.status(403).json({
+                success: false,
+                message:
+                    "You do not have access to this station"
+            });
+
+        }
+
+
+        return res.status(200).json({
+
+            success: true,
+
+            data:
+                reading
+
+        });
+
+    } catch (error) {
+
+        console.error(
+            "GET SINGLE METER READING UNEXPECTED ERROR:",
+            error
+        );
+
+        return res.status(500).json({
+
+            success: false,
+
+            message:
+                "Unexpected error while loading meter reading"
+
+        });
+
+    }
+
+}
+
+
+/* =========================================================
+   DELETE METER READING
+   ========================================================= */
+
+async function deleteMeterReading(req, res) {
+
+    try {
+
+        console.log("==========================================");
+        console.log("FUELGAP - DELETE METER READING");
+        console.log("==========================================");
+
+
+        /* =====================================================
+           AUTHENTICATION
+        ===================================================== */
+
+        if (!req.user || !req.user.id) {
+
+            return res.status(401).json({
+                success: false,
+                message:
+                    "Authentication required"
+            });
+
+        }
+
+
+        const appUser =
+            await getApplicationUser(
+                req.user.id
+            );
+
+
+        if (!appUser) {
+
+            return res.status(404).json({
+                success: false,
+                message:
+                    "Application user profile not found"
+            });
+
+        }
+
+
+        if (appUser.is_active === false) {
+
+            return res.status(403).json({
+                success: false,
+                message:
+                    "Your account is inactive"
+            });
+
+        }
+
+
+        /* =====================================================
+           DELETE PERMISSION
+        ===================================================== */
+
+        if (
+            ![
+                "owner",
+                "admin",
+                "super_admin"
+            ].includes(
+                appUser.role
+            )
+        ) {
+
+            return res.status(403).json({
+
+                success: false,
+
+                message:
+                    "You do not have permission to delete meter readings"
+
+            });
+
+        }
+
+
+        /* =====================================================
+           READING ID
+        ===================================================== */
+
+        const readingId =
+            req.params.id;
+
+
+        if (!readingId) {
+
+            return res.status(400).json({
+                success: false,
+                message:
+                    "Meter reading ID is required"
+            });
+
+        }
+
+
+        /* =====================================================
+           FIND READING
+        ===================================================== */
+
+        const {
+            data: reading,
+            error: readingError
+        } = await supabaseAdmin
+            .from("meter_readings")
+            .select(`
+                id,
+                station_id
+            `)
+            .eq(
+                "id",
+                readingId
+            )
+            .maybeSingle();
+
+
+        if (readingError) {
+
+            console.error(
+                "DELETE METER READING LOOKUP ERROR:",
+                readingError
+            );
+
+            return res.status(500).json({
+                success: false,
+                message:
+                    "Unable to find meter reading"
+            });
+
+        }
+
+
+        if (!reading) {
+
+            return res.status(404).json({
+                success: false,
+                message:
+                    "Meter reading not found"
+            });
+
+        }
+
+
+        /* =====================================================
+           VERIFY STATION
         ===================================================== */
 
         const {
@@ -1347,310 +1536,54 @@ async function getMeterReadingById(req, res) {
 
         if (stationError) {
 
-            return res.status(500).json({
-                success: false,
-                message:
-                    "Unable to verify reading station.",
-                error: stationError.message
-            });
-        }
-
-
-        if (
-            !station ||
-            String(
-                station.organization_id
-            ) !==
-            String(
-                appUser.organization_id
-            )
-        ) {
-
-            return res.status(403).json({
-                success: false,
-                message:
-                    "You are not allowed to access this meter reading."
-            });
-        }
-
-
-        /* =====================================================
-           6. STATION-LEVEL ACCESS
-        ===================================================== */
-
-        const userRole =
-            String(
-                appUser.role || ""
-            ).toLowerCase();
-
-
-        const organizationWideRoles = [
-            "owner",
-            "admin",
-            "super_admin"
-        ];
-
-
-        const hasOrganizationWideAccess =
-            organizationWideRoles.includes(
-                userRole
-            );
-
-
-        if (
-            !hasOrganizationWideAccess &&
-            appUser.station_id &&
-            String(appUser.station_id) !==
-            String(reading.station_id)
-        ) {
-
-            return res.status(403).json({
-                success: false,
-                message:
-                    "You are not allowed to access readings from this station."
-            });
-        }
-
-
-        /* =====================================================
-           7. SUCCESS
-        ===================================================== */
-
-        return res.status(200).json({
-
-            success: true,
-
-            data: reading
-        });
-
-
-    } catch (error) {
-
-        console.error(
-            "GET SINGLE METER READING UNEXPECTED ERROR:",
-            error
-        );
-
-        return res.status(500).json({
-            success: false,
-            message:
-                "An unexpected error occurred while loading the meter reading.",
-            error: error.message
-        });
-    }
-}
-
-
-/* =========================================================
-   DELETE METER READING
-   ========================================================= */
-
-async function deleteMeterReading(req, res) {
-
-    try {
-
-        console.log(
-            "FUELGAP - DELETE METER READING"
-        );
-
-
-        /* =====================================================
-           1. AUTHENTICATION
-        ===================================================== */
-
-        if (!req.user || !req.user.id) {
-
-            return res.status(401).json({
-                success: false,
-                message:
-                    "Authentication required."
-            });
-        }
-
-
-        /* =====================================================
-           2. APPLICATION USER
-        ===================================================== */
-
-        const {
-            user: appUser,
-            error: userError
-        } = await getApplicationUser(
-            req.user.id
-        );
-
-
-        if (userError || !appUser) {
-
-            return res.status(404).json({
-                success: false,
-                message:
-                    "FuelGap user profile not found."
-            });
-        }
-
-
-        /* =====================================================
-           3. CHECK ACTIVE USER
-        ===================================================== */
-
-        if (appUser.is_active === false) {
-
-            return res.status(403).json({
-                success: false,
-                message:
-                    "Your FuelGap account is inactive."
-            });
-        }
-
-
-        /* =====================================================
-           4. DELETE PERMISSION
-        ===================================================== */
-
-        const userRole =
-            String(
-                appUser.role || ""
-            ).toLowerCase();
-
-
-        const allowedDeleteRoles = [
-            "owner",
-            "admin",
-            "super_admin"
-        ];
-
-
-        if (
-            !allowedDeleteRoles.includes(
-                userRole
-            )
-        ) {
-
-            return res.status(403).json({
-                success: false,
-                message:
-                    "You do not have permission to delete meter readings."
-            });
-        }
-
-
-        /* =====================================================
-           5. GET READING ID
-        ===================================================== */
-
-        const readingId =
-            req.params.id;
-
-
-        if (!readingId) {
-
-            return res.status(400).json({
-                success: false,
-                message:
-                    "Meter reading ID is required."
-            });
-        }
-
-
-        /* =====================================================
-           6. FIND READING
-        ===================================================== */
-
-        const {
-            data: existingReading,
-            error: findError
-        } = await supabaseAdmin
-            .from("meter_readings")
-            .select(`
-                id,
-                station_id,
-                reading_type,
-                reading,
-                photo_url,
-                captured_at
-            `)
-            .eq("id", readingId)
-            .maybeSingle();
-
-
-        if (findError) {
-
             console.error(
-                "DELETE METER READING - FIND ERROR:",
-                findError
+                "DELETE READING STATION ERROR:",
+                stationError
             );
 
             return res.status(500).json({
                 success: false,
                 message:
-                    "Unable to find meter reading.",
-                error: findError.message
+                    "Unable to verify reading station"
             });
+
         }
 
 
-        if (!existingReading) {
+        if (!station) {
 
             return res.status(404).json({
                 success: false,
                 message:
-                    "Meter reading not found."
+                    "Reading station not found"
             });
+
         }
 
 
         /* =====================================================
-           7. VERIFY STATION ORGANIZATION
+           ORGANIZATION SECURITY
         ===================================================== */
 
-        const {
-            data: station,
-            error: stationError
-        } = await supabaseAdmin
-            .from("stations")
-            .select(`
-                id,
-                organization_id
-            `)
-            .eq(
-                "id",
-                existingReading.station_id
-            )
-            .maybeSingle();
-
-
-        if (stationError) {
-
-            return res.status(500).json({
-                success: false,
-                message:
-                    "Unable to verify station ownership.",
-                error: stationError.message
-            });
-        }
-
-
         if (
-            !station ||
-            String(
-                station.organization_id
-            ) !==
-            String(
-                appUser.organization_id
-            )
+            station.organization_id !==
+            appUser.organization_id
         ) {
 
             return res.status(403).json({
+
                 success: false,
+
                 message:
-                    "You are not allowed to delete this meter reading."
+                    "You cannot delete a reading outside your organization"
+
             });
+
         }
 
 
         /* =====================================================
-           8. DELETE
+           DELETE READING
         ===================================================== */
 
         const {
@@ -1658,28 +1591,30 @@ async function deleteMeterReading(req, res) {
         } = await supabaseAdmin
             .from("meter_readings")
             .delete()
-            .eq("id", readingId);
+            .eq(
+                "id",
+                readingId
+            );
 
 
         if (deleteError) {
 
             console.error(
-                "DELETE METER READING ERROR:",
+                "DELETE METER READING DATABASE ERROR:",
                 deleteError
             );
 
             return res.status(500).json({
+
                 success: false,
+
                 message:
-                    "Failed to delete meter reading.",
-                error: deleteError.message
+                    "Unable to delete meter reading"
+
             });
+
         }
 
-
-        /* =====================================================
-           9. SUCCESS
-        ===================================================== */
 
         console.log(
             "METER READING DELETED:",
@@ -1692,9 +1627,9 @@ async function deleteMeterReading(req, res) {
             success: true,
 
             message:
-                "Meter reading deleted successfully."
-        });
+                "Meter reading deleted successfully"
 
+        });
 
     } catch (error) {
 
@@ -1704,12 +1639,16 @@ async function deleteMeterReading(req, res) {
         );
 
         return res.status(500).json({
+
             success: false,
+
             message:
-                "An unexpected error occurred while deleting the meter reading.",
-            error: error.message
+                "Unexpected error while deleting meter reading"
+
         });
+
     }
+
 }
 
 
