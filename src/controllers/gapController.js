@@ -1,43 +1,96 @@
 /* =========================================================
-   FUELGAP - GAP / RECONCILIATION CONTROLLER
-   SUPABASE + EXPRESS
-   HTTPONLY COOKIE SESSION
+   FUELGAP - GAP CONTROLLER
+   =========================================================
+   PURPOSE:
+   - Calculate meter gaps using OPENING + CLOSING readings
+   - NO SALES CALCULATION
+   - Automatically create alerts for calculated gaps
+   - Support historical readings
+   - Support OPEN and CLOSED shifts
+   - Prevent duplicate gap records for the same pair
+   - Get gaps
+   - Get single gap
+   - Manually process a gap
 
-   PRODUCTION VERSION
+   CORE FORMULA:
 
-   AUTOMATIC RECONCILIATION:
+       CLOSING METER
+       -
+       OPENING METER
+       =
+       METER GAP
 
-   STATION
-      ↓
-   PUMP
-      ↓
-   NOZZLE
-      ↓
-   SHIFT
-      ↓
-   OPENING METER
-      ↓
-   CLOSING / PERIODIC METER
-      ↓
-   SALES
-      ↓
-   RECONCILIATION
-      ↓
-   GAP / VARIANCE
-========================================================= */
+   IMPORTANT:
+   SALES ARE NOT USED HERE.
+   ========================================================= */
 
 const supabaseAdmin = require("../config/supabaseAdmin");
+
+const {
+    createSystemGapAlert
+} = require("./alertController");
+
+
+/* =========================================================
+   HELPERS
+========================================================= */
+
+function cleanString(value) {
+
+    if (
+        value === undefined ||
+        value === null
+    ) {
+        return "";
+    }
+
+    return String(value).trim();
+}
+
+
+function normalizeRole(role) {
+
+    return cleanString(role)
+        .toLowerCase();
+}
+
+
+function isManagementRole(role) {
+
+    return [
+        "owner",
+        "admin",
+        "super_admin",
+        "manager"
+    ].includes(
+        normalizeRole(role)
+    );
+}
+
+
+function isRestrictedRole(role) {
+
+    return [
+        "staff",
+        "attendant"
+    ].includes(
+        normalizeRole(role)
+    );
+}
 
 
 /* =========================================================
    GET APPLICATION USER
 ========================================================= */
 
-const getApplicationUser = async (authUserId) => {
+async function getApplicationUser(
+    authUserId
+) {
 
     if (!authUserId) {
         return null;
     }
+
 
     const {
         data,
@@ -46,1449 +99,1066 @@ const getApplicationUser = async (authUserId) => {
         .from("users")
         .select(`
             id,
+            auth_user_id,
             organization_id,
             full_name,
             email,
             phone,
             role,
             is_active,
-            auth_user_id,
             station_id
         `)
-        .eq("auth_user_id", authUserId)
+        .eq(
+            "auth_user_id",
+            authUserId
+        )
         .maybeSingle();
+
+
+    if (error) {
+
+        console.error(
+            "GAP GET APPLICATION USER ERROR:",
+            error
+        );
+
+        throw error;
+    }
+
+
+    return data || null;
+}
+
+
+/* =========================================================
+   VERIFY STATION ACCESS
+========================================================= */
+
+async function verifyStationAccess(
+    organizationId,
+    stationId
+) {
+
+    const {
+        data: station,
+        error
+    } = await supabaseAdmin
+        .from("stations")
+        .select(`
+            id,
+            organization_id,
+            name,
+            is_active
+        `)
+        .eq(
+            "id",
+            stationId
+        )
+        .eq(
+            "organization_id",
+            organizationId
+        )
+        .maybeSingle();
+
 
     if (error) {
         throw error;
     }
 
-    return data || null;
-};
 
-
-/* =========================================================
-   GET USER ORGANIZATION
-========================================================= */
-
-const getUserOrganizationId = async (req) => {
-
-    if (req.organizationId) {
-        return req.organizationId;
+    if (!station) {
+        throw new Error(
+            "Station was not found in this organization."
+        );
     }
 
-    if (req.profile?.organization_id) {
-        return req.profile.organization_id;
-    }
 
-    if (req.user?.organization_id) {
-        return req.user.organization_id;
-    }
-
-    if (req.user?.id) {
-
-        const applicationUser =
-            await getApplicationUser(req.user.id);
-
-        if (applicationUser) {
-            return applicationUser.organization_id;
-        }
-    }
-
-    return null;
-};
+    return station;
+}
 
 
 /* =========================================================
-   ROUND MONEY
+   FIND MATCHING OPENING READING FOR CLOSING
 ========================================================= */
 
-const roundMoney = (value) => {
+async function findOpeningForClosing({
+    stationId,
+    pumpId,
+    nozzleId,
+    shiftId,
+    closingCapturedAt
+}) {
 
-    return Math.round(
-        (Number(value) + Number.EPSILON) * 100
-    ) / 100;
-};
-
-
-/* =========================================================
-   ROUND LITRES
-========================================================= */
-
-const roundLitres = (value) => {
-
-    return Math.round(
-        (Number(value) + Number.EPSILON) * 1000
-    ) / 1000;
-};
-
-
-/* =========================================================
-   VALID ID
-========================================================= */
-
-const isValidId = (value) => {
-
-    return (
-        value !== undefined &&
-        value !== null &&
-        String(value).trim() !== ""
-    );
-};
-
-
-/* =========================================================
-   CREATE GAP
-   POST /api/gaps
-========================================================= */
-
-const createGap = async (req, res) => {
-
-    try {
-
-        /* =====================================================
-           AUTHENTICATION
-        ===================================================== */
-
-        if (!req.user || !req.user.id) {
-
-            return res.status(401).json({
-                success: false,
-                message: "Authenticated user not found"
-            });
-        }
-
-
-        /* =====================================================
-           APPLICATION USER
-        ===================================================== */
-
-        const applicationUser =
-            await getApplicationUser(req.user.id);
-
-
-        if (!applicationUser) {
-
-            return res.status(401).json({
-                success: false,
-                message: "Application user profile not found"
-            });
-        }
-
-
-        if (applicationUser.is_active === false) {
-
-            return res.status(403).json({
-                success: false,
-                message: "Your account is inactive"
-            });
-        }
-
-
-        /* =====================================================
-           ORGANIZATION
-        ===================================================== */
-
-        const organizationId =
-            await getUserOrganizationId(req);
-
-
-        if (!organizationId) {
-
-            return res.status(400).json({
-                success: false,
-                message: "Organization could not be determined"
-            });
-        }
-
-
-        /* =====================================================
-           REQUEST BODY
-        ===================================================== */
-
-        const {
+    const {
+        data: opening,
+        error
+    } = await supabaseAdmin
+        .from("meter_readings")
+        .select(`
+            id,
             station_id,
             pump_id,
             nozzle_id,
+            reading_type,
+            reading,
             shift_id,
-            notes
-        } = req.body;
-
-
-        /* =====================================================
-           DEBUG REQUEST
-        ===================================================== */
-
-        console.log("==============================================");
-        console.log("CREATE GAP REQUEST");
-        console.log("Station ID:", station_id);
-        console.log("Pump ID:", pump_id);
-        console.log("Nozzle ID:", nozzle_id);
-        console.log("Shift ID:", shift_id);
-        console.log("Organization ID:", organizationId);
-        console.log("User ID:", applicationUser.id);
-        console.log("==============================================");
-
-
-        /* =====================================================
-           BASIC VALIDATION
-        ===================================================== */
-
-        if (!isValidId(station_id)) {
-
-            return res.status(400).json({
-                success: false,
-                message: "Station ID is required"
-            });
-        }
-
-
-        if (!isValidId(pump_id)) {
-
-            return res.status(400).json({
-                success: false,
-                message: "Pump ID is required"
-            });
-        }
-
-
-        if (!isValidId(nozzle_id)) {
-
-            return res.status(400).json({
-                success: false,
-                message: "Nozzle ID is required"
-            });
-        }
-
-
-        if (!isValidId(shift_id)) {
-
-            return res.status(400).json({
-                success: false,
-                message: "Shift ID is required"
-            });
-        }
-
-
-        /* =====================================================
-           VERIFY STATION
-        ===================================================== */
-
-        const {
-            data: station,
-            error: stationError
-        } = await supabaseAdmin
-            .from("stations")
-            .select(`
-                id,
-                organization_id,
-                name,
-                address,
-                city,
-                state,
-                is_active
-            `)
-            .eq("id", station_id)
-            .eq("organization_id", organizationId)
-            .maybeSingle();
-
-
-        if (stationError) {
-
-            console.error(
-                "GAP STATION LOOKUP ERROR:",
-                stationError
-            );
-
-            return res.status(500).json({
-                success: false,
-                message: "Failed to verify station",
-                error: stationError.message,
-                code: stationError.code || null,
-                details: stationError.details || null,
-                hint: stationError.hint || null
-            });
-        }
-
-
-        if (!station) {
-
-            return res.status(404).json({
-                success: false,
-                message:
-                    "Station not found or does not belong to your organization"
-            });
-        }
-
-
-        if (station.is_active === false) {
-
-            return res.status(400).json({
-                success: false,
-                message: "Selected station is inactive"
-            });
-        }
-
-
-        /* =====================================================
-           VERIFY STATION ACCESS
-        ===================================================== */
-
-        const role =
-            String(applicationUser.role || "")
-                .toLowerCase()
-                .trim();
-
-
-        const unrestrictedRoles = [
-            "owner",
-            "admin"
-        ];
-
-
-        if (
-            !unrestrictedRoles.includes(role) &&
-            applicationUser.station_id &&
-            String(applicationUser.station_id) !== String(station_id)
-        ) {
-
-            return res.status(403).json({
-                success: false,
-                message:
-                    "You do not have access to this station"
-            });
-        }
-
-
-        /* =====================================================
-           VERIFY PUMP
-        ===================================================== */
-
-        const {
-            data: pump,
-            error: pumpError
-        } = await supabaseAdmin
-            .from("pumps")
-            .select(`
-                id,
-                station_id,
-                pump_number,
-                brand,
-                model,
-                is_active
-            `)
-            .eq("id", pump_id)
-            .eq("station_id", station_id)
-            .maybeSingle();
-
-
-        if (pumpError) {
-
-            console.error(
-                "GAP PUMP LOOKUP ERROR:",
-                pumpError
-            );
-
-            return res.status(500).json({
-                success: false,
-                message: "Failed to verify pump",
-                error: pumpError.message,
-                code: pumpError.code || null,
-                details: pumpError.details || null,
-                hint: pumpError.hint || null
-            });
-        }
-
-
-        if (!pump) {
-
-            return res.status(404).json({
-                success: false,
-                message:
-                    "Pump not found or does not belong to the selected station"
-            });
-        }
-
-
-        if (pump.is_active === false) {
-
-            return res.status(400).json({
-                success: false,
-                message: "Selected pump is inactive"
-            });
-        }
-
-
-        /* =====================================================
-           VERIFY NOZZLE
-        ===================================================== */
-
-        const {
-            data: nozzle,
-            error: nozzleError
-        } = await supabaseAdmin
-            .from("nozzles")
-            .select(`
-                id,
-                pump_id,
-                nozzle_number,
-                product,
-                price_per_litre,
-                is_active
-            `)
-            .eq("id", nozzle_id)
-            .eq("pump_id", pump_id)
-            .maybeSingle();
-
-
-        if (nozzleError) {
-
-            console.error(
-                "GAP NOZZLE LOOKUP ERROR:",
-                nozzleError
-            );
-
-            return res.status(500).json({
-                success: false,
-                message: "Failed to verify nozzle",
-                error: nozzleError.message,
-                code: nozzleError.code || null,
-                details: nozzleError.details || null,
-                hint: nozzleError.hint || null
-            });
-        }
-
-
-        if (!nozzle) {
-
-            return res.status(404).json({
-                success: false,
-                message:
-                    "Nozzle not found or does not belong to the selected pump"
-            });
-        }
-
-
-        if (nozzle.is_active === false) {
-
-            return res.status(400).json({
-                success: false,
-                message: "Selected nozzle is inactive"
-            });
-        }
-
-
-        /* =====================================================
-           PRICE PER LITRE
-        ===================================================== */
-
-        const pricePerLitre =
-            Number(nozzle.price_per_litre);
-
-
-        if (
-            !Number.isFinite(pricePerLitre) ||
-            pricePerLitre < 0
-        ) {
-
-            return res.status(400).json({
-                success: false,
-                message:
-                    "Nozzle price per litre is invalid"
-            });
-        }
-
-
-        /* =====================================================
-           VERIFY SHIFT
-        ===================================================== */
-
-        const {
-            data: shift,
-            error: shiftError
-        } = await supabaseAdmin
-            .from("shifts")
-            .select(`
-                id,
-                station_id,
-                opened_by,
-                closed_by,
-                shift_name,
-                shift_date,
-                start_time,
-                end_shift,
-                status,
-                created_at
-            `)
-            .eq("id", shift_id)
-            .eq("station_id", station_id)
-            .maybeSingle();
-
-
-        if (shiftError) {
-
-            console.error(
-                "GAP SHIFT LOOKUP ERROR:",
-                shiftError
-            );
-
-            return res.status(500).json({
-                success: false,
-                message: "Failed to verify shift",
-                error: shiftError.message,
-                code: shiftError.code || null,
-                details: shiftError.details || null,
-                hint: shiftError.hint || null
-            });
-        }
-
-
-        if (!shift) {
-
-            return res.status(404).json({
-                success: false,
-                message:
-                    "Shift not found or does not belong to the selected station"
-            });
-        }
-
-
-        const shiftStatus =
-            String(shift.status || "")
-                .toLowerCase()
-                .trim();
-
-
-        if (
-            shiftStatus !== "open" &&
-            shiftStatus !== "closed"
-        ) {
-
-            return res.status(400).json({
-                success: false,
-                message:
-                    `Selected shift cannot be reconciled because its status is "${shift.status}"`
-            });
-        }
-
-
-        /* =====================================================
-           =====================================================
-           GET ALL METER READINGS FOR THIS COMBINATION
-           =====================================================
-
-           IMPORTANT:
-
-           We first retrieve ALL readings for:
-
-           station
-           pump
-           nozzle
-           shift
-
-           Then we select the correct reading in JavaScript.
-
-           This gives us much better debugging than relying on
-           one very strict Supabase query.
-        ===================================================== */
-
-        console.log("");
-        console.log("==============================================");
-        console.log("SEARCHING METER READINGS");
-        console.log("Station:", station_id);
-        console.log("Pump:", pump_id);
-        console.log("Nozzle:", nozzle_id);
-        console.log("Shift:", shift_id);
-        console.log("==============================================");
-
-
-        const {
-            data: meterReadings,
-            error: meterReadingsError
-        } = await supabaseAdmin
-            .from("meter_readings")
-            .select(`
-                id,
-                station_id,
-                pump_id,
-                nozzle_id,
-                shift_id,
-                reading_type,
-                reading,
-                recorded_by,
-                photo_url,
-                captured_at,
-                created_at
-            `)
-            .eq("station_id", station_id)
-            .eq("pump_id", pump_id)
-            .eq("nozzle_id", nozzle_id)
-            .order("created_at", {
-                ascending: true
-            });
-
-
-        if (meterReadingsError) {
-
-            console.error(
-                "GAP METER READINGS LOOKUP ERROR:",
-                meterReadingsError
-            );
-
-            return res.status(500).json({
-                success: false,
-                message:
-                    "Failed to retrieve meter readings",
-                error:
-                    meterReadingsError.message,
-                code:
-                    meterReadingsError.code || null,
-                details:
-                    meterReadingsError.details || null,
-                hint:
-                    meterReadingsError.hint || null
-            });
-        }
-
-
-        const allMeterReadings =
-            Array.isArray(meterReadings)
-                ? meterReadings
-                : [];
-
-
-        console.log(
-            "TOTAL METER READINGS FOR STATION/PUMP/NOZZLE:",
-            allMeterReadings.length
-        );
-
-
-        if (allMeterReadings.length) {
-
-            console.table(
-                allMeterReadings.map((item) => ({
-                    id: item.id,
-                    station_id: item.station_id,
-                    pump_id: item.pump_id,
-                    nozzle_id: item.nozzle_id,
-                    shift_id: item.shift_id,
-                    reading_type: item.reading_type,
-                    reading: item.reading,
-                    created_at: item.created_at
-                }))
-            );
-        }
-
-
-        /* =====================================================
-           FILTER READINGS FOR SELECTED SHIFT
-        ===================================================== */
-
-        const shiftMeterReadings =
-            allMeterReadings.filter((item) => {
-
-                return String(item.shift_id || "") ===
-                    String(shift_id);
-            });
-
-
-        console.log(
-            "METER READINGS FOR SELECTED SHIFT:",
-            shiftMeterReadings.length
-        );
-
-
-        if (shiftMeterReadings.length) {
-
-            console.table(
-                shiftMeterReadings.map((item) => ({
-                    id: item.id,
-                    shift_id: item.shift_id,
-                    reading_type: item.reading_type,
-                    reading: item.reading,
-                    created_at: item.created_at
-                }))
-            );
-        }
-
-
-        /* =====================================================
-           GET OPENING READING
-        ===================================================== */
-
-        let openingMeterRecord = null;
-
-
-        /* -----------------------------------------------------
-           FIRST PRIORITY:
-           opening + selected shift
-        ----------------------------------------------------- */
-
-        openingMeterRecord =
-            shiftMeterReadings
-                .filter((item) => {
-
-                    return String(item.reading_type || "")
-                        .toLowerCase()
-                        .trim() === "opening";
-                })
-                .sort((a, b) => {
-
-                    return new Date(a.created_at) -
-                        new Date(b.created_at);
-                })[0] || null;
-
-
-        /* -----------------------------------------------------
-           SECOND PRIORITY:
-           periodic + selected shift
-        ----------------------------------------------------- */
-
-        if (!openingMeterRecord) {
-
-            openingMeterRecord =
-                shiftMeterReadings
-                    .filter((item) => {
-
-                        return String(item.reading_type || "")
-                            .toLowerCase()
-                            .trim() === "periodic";
-                    })
-                    .sort((a, b) => {
-
-                        return new Date(a.created_at) -
-                            new Date(b.created_at);
-                    })[0] || null;
-        }
-
-
-        /* -----------------------------------------------------
-           THIRD PRIORITY:
-           opening without shift
-
-           This handles older meter records that were created
-           before shift_id was properly saved.
-        ----------------------------------------------------- */
-
-        if (!openingMeterRecord) {
-
-            const noShiftOpening =
-                allMeterReadings
-                    .filter((item) => {
-
-                        const type =
-                            String(item.reading_type || "")
-                                .toLowerCase()
-                                .trim();
-
-                        const itemShift =
-                            item.shift_id;
-
-                        return (
-                            type === "opening" &&
-                            !itemShift
-                        );
-                    })
-                    .sort((a, b) => {
-
-                        return new Date(a.created_at) -
-                            new Date(b.created_at);
-                    })[0] || null;
-
-
-            if (noShiftOpening) {
-
-                console.warn(
-                    "WARNING: Opening meter reading found WITHOUT shift_id.",
-                    noShiftOpening
-                );
-
-                openingMeterRecord =
-                    noShiftOpening;
-            }
-        }
-
-
-        /* =====================================================
-           OPENING READING NOT FOUND
-        ===================================================== */
-
-        if (!openingMeterRecord) {
-
-            console.error("");
-            console.error(
-                "=============================================="
-            );
-            console.error(
-                "OPENING METER READING NOT FOUND"
-            );
-            console.error(
-                "Requested station:",
-                station_id
-            );
-            console.error(
-                "Requested pump:",
-                pump_id
-            );
-            console.error(
-                "Requested nozzle:",
-                nozzle_id
-            );
-            console.error(
-                "Requested shift:",
-                shift_id
-            );
-            console.error(
-                "Total matching meter records:",
-                allMeterReadings.length
-            );
-            console.error(
-                "Matching shift records:",
-                shiftMeterReadings.length
-            );
-            console.error(
-                "=============================================="
-            );
-
-
-            return res.status(400).json({
-                success: false,
-                message:
-                    "No opening meter reading found for the selected nozzle and shift. Please record an opening meter reading first.",
-                debug: {
-                    requested: {
-                        station_id,
-                        pump_id,
-                        nozzle_id,
-                        shift_id
-                    },
-                    total_meter_readings:
-                        allMeterReadings.length,
-                    shift_meter_readings:
-                        shiftMeterReadings.length
-                }
-            });
-        }
-
-
-        console.log(
-            "SELECTED OPENING METER:",
-            openingMeterRecord
-        );
-
-
-        const openingReading =
-            Number(openingMeterRecord.reading);
-
-
-        if (
-            !Number.isFinite(openingReading) ||
-            openingReading < 0
-        ) {
-
-            return res.status(400).json({
-                success: false,
-                message:
-                    "Opening meter reading is invalid"
-            });
-        }
-
-
-        /* =====================================================
-           GET CLOSING READING
-        ===================================================== */
-
-        let closingMeterRecord = null;
-
-
-        /* -----------------------------------------------------
-           CLOSING READING
-        ----------------------------------------------------- */
-
-        closingMeterRecord =
-            shiftMeterReadings
-                .filter((item) => {
-
-                    return String(item.reading_type || "")
-                        .toLowerCase()
-                        .trim() === "closing";
-                })
-                .sort((a, b) => {
-
-                    return new Date(b.created_at) -
-                        new Date(a.created_at);
-                })[0] || null;
-
-
-        /* -----------------------------------------------------
-           PERIODIC READING
-        ----------------------------------------------------- */
-
-        if (!closingMeterRecord) {
-
-            closingMeterRecord =
-                shiftMeterReadings
-                    .filter((item) => {
-
-                        return String(item.reading_type || "")
-                            .toLowerCase()
-                            .trim() === "periodic";
-                    })
-                    .sort((a, b) => {
-
-                        return new Date(b.created_at) -
-                            new Date(a.created_at);
-                    })[0] || null;
-        }
-
-
-        /* -----------------------------------------------------
-           ANY LATEST READING
-        ----------------------------------------------------- */
-
-        if (!closingMeterRecord) {
-
-            closingMeterRecord =
-                shiftMeterReadings
-                    .slice()
-                    .sort((a, b) => {
-
-                        return new Date(b.created_at) -
-                            new Date(a.created_at);
-                    })[0] || null;
-        }
-
-
-        if (!closingMeterRecord) {
-
-            return res.status(400).json({
-                success: false,
-                message:
-                    "No closing meter reading found for the selected nozzle and shift. Please record a closing or periodic meter reading first."
-            });
-        }
-
-
-        console.log(
-            "SELECTED CLOSING METER:",
-            closingMeterRecord
-        );
-
-
-        const closingReading =
-            Number(closingMeterRecord.reading);
-
-
-        if (
-            !Number.isFinite(closingReading) ||
-            closingReading < 0
-        ) {
-
-            return res.status(400).json({
-                success: false,
-                message:
-                    "Closing meter reading is invalid"
-            });
-        }
-
-
-        /* =====================================================
-           VALIDATE METER MOVEMENT
-        ===================================================== */
-
-        if (closingReading < openingReading) {
-
-            return res.status(400).json({
-                success: false,
-                message:
-                    "Closing meter reading cannot be less than opening meter reading"
-            });
-        }
-
-
-        /* =====================================================
-           CALCULATE LITRES SOLD
-        ===================================================== */
-
-        const litresSold =
-            roundLitres(
-                closingReading - openingReading
-            );
-
-
-        /* =====================================================
-           EXPECTED SALES
-        ===================================================== */
-
-        const expectedSales =
-            roundMoney(
-                litresSold * pricePerLitre
-            );
-
-
-        /* =====================================================
-           GET SALES
-        ===================================================== */
-
-        const {
-            data: sales,
-            error: salesError
-        } = await supabaseAdmin
-            .from("sales")
-            .select(`
-                id,
-                station_id,
-                pump_id,
-                nozzle_id,
-                shift_id,
-                recorded_by,
-                litres,
-                price_per_litre,
-                amount,
-                payment_method,
-                created_at
-            `)
-            .eq("station_id", station_id)
-            .eq("pump_id", pump_id)
-            .eq("nozzle_id", nozzle_id)
-            .eq("shift_id", shift_id)
-            .order("created_at", {
-                ascending: true
-            });
-
-
-        if (salesError) {
-
-            console.error(
-                "GAP SALES LOOKUP ERROR:",
-                salesError
-            );
-
-            return res.status(500).json({
-                success: false,
-                message:
-                    "Failed to retrieve sales records",
-                error:
-                    salesError.message,
-                code:
-                    salesError.code || null,
-                details:
-                    salesError.details || null,
-                hint:
-                    salesError.hint || null
-            });
-        }
-
-
-        const salesRecords =
-            Array.isArray(sales)
-                ? sales
-                : [];
-
-
-        /* =====================================================
-           CALCULATE ACTUAL SALES
-        ===================================================== */
-
-        let actualSales = 0;
-        let actualLitres = 0;
-
-
-        for (const sale of salesRecords) {
-
-            const saleLitres =
-                Number(sale.litres || 0);
-
-            const saleAmount =
-                Number(sale.amount || 0);
-
-
-            if (
-                Number.isFinite(saleLitres) &&
-                saleLitres >= 0
-            ) {
-
-                actualLitres += saleLitres;
-            }
-
-
-            if (
-                Number.isFinite(saleAmount) &&
-                saleAmount >= 0
-            ) {
-
-                actualSales += saleAmount;
-            }
-        }
-
-
-        actualLitres =
-            roundLitres(actualLitres);
-
-
-        actualSales =
-            roundMoney(actualSales);
-
-
-        /* =====================================================
-           LITRES VARIANCE
-        ===================================================== */
-
-        const litresVariance =
-            roundLitres(
-                litresSold - actualLitres
-            );
-
-
-        /* =====================================================
-           GAP AMOUNT
-        ===================================================== */
-
-        const gapAmount =
-            roundMoney(
-                expectedSales - actualSales
-            );
-
-
-        /* =====================================================
-           STATUS
-        ===================================================== */
-
-        const tolerance = 0.01;
-
-        const status =
-            Math.abs(gapAmount) <= tolerance
-                ? "normal"
-                : "variance";
-
-
-        /* =====================================================
-           CHECK EXISTING GAP
-        ===================================================== */
-
-        const {
-            data: existingGaps,
-            error: existingGapError
-        } = await supabaseAdmin
-            .from("gaps")
-            .select(`
-                id,
-                station_id,
-                pump_id,
-                nozzle_id,
-                shift_id,
-                opening_reading,
-                closing_reading,
-                litres_sold,
-                expected_sales,
-                actual_sales,
-                gap_amount,
-                status,
-                notes,
-                created_at
-            `)
-            .eq("station_id", station_id)
-            .eq("pump_id", pump_id)
-            .eq("nozzle_id", nozzle_id)
-            .eq("shift_id", shift_id)
-            .order("created_at", {
+            captured_at,
+            created_at,
+            recorded_by
+        `)
+        .eq(
+            "station_id",
+            stationId
+        )
+        .eq(
+            "pump_id",
+            pumpId
+        )
+        .eq(
+            "nozzle_id",
+            nozzleId
+        )
+        .eq(
+            "shift_id",
+            shiftId
+        )
+        .eq(
+            "reading_type",
+            "opening"
+        )
+        .lte(
+            "captured_at",
+            closingCapturedAt
+        )
+        .order(
+            "captured_at",
+            {
                 ascending: false
-            })
-            .limit(1);
+            }
+        )
+        .limit(1)
+        .maybeSingle();
 
 
-        if (existingGapError) {
-
-            console.error(
-                "CHECK EXISTING GAP ERROR:",
-                existingGapError
-            );
-
-            return res.status(500).json({
-                success: false,
-                message:
-                    "Failed to check existing reconciliation",
-                error:
-                    existingGapError.message,
-                code:
-                    existingGapError.code || null,
-                details:
-                    existingGapError.details || null,
-                hint:
-                    existingGapError.hint || null
-            });
-        }
+    if (error) {
+        throw error;
+    }
 
 
-        const existingGap =
-            existingGaps &&
-            existingGaps.length
-                ? existingGaps[0]
-                : null;
+    return opening || null;
+}
 
 
-        if (existingGap) {
+/* =========================================================
+   FIND MATCHING CLOSING READING FOR OPENING
+========================================================= */
 
-            return res.status(409).json({
-                success: false,
-                message:
-                    "A gap reconciliation already exists for this nozzle and shift",
-                data: {
-                    gap: existingGap
-                }
-            });
-        }
+async function findClosingForOpening({
+    stationId,
+    pumpId,
+    nozzleId,
+    shiftId,
+    openingCapturedAt
+}) {
 
-
-        /* =====================================================
-           CREATE GAP
-        ===================================================== */
-
-        const {
-            data: gap,
-            error: gapError
-        } = await supabaseAdmin
-            .from("gaps")
-            .insert([
-                {
-                    station_id,
-                    pump_id,
-                    nozzle_id,
-                    shift_id,
-                    opening_reading: openingReading,
-                    closing_reading: closingReading,
-                    litres_sold: litresSold,
-                    expected_sales: expectedSales,
-                    actual_sales: actualSales,
-                    gap_amount: gapAmount,
-                    status,
-                    notes: notes || null
-                }
-            ])
-            .select(`
-                id,
-                station_id,
-                pump_id,
-                nozzle_id,
-                shift_id,
-                opening_reading,
-                closing_reading,
-                litres_sold,
-                expected_sales,
-                actual_sales,
-                gap_amount,
-                status,
-                notes,
-                created_at
-            `)
-            .single();
-
-
-        if (gapError) {
-
-            console.error(
-                "CREATE GAP ERROR:",
-                gapError
-            );
-
-            return res.status(500).json({
-                success: false,
-                message:
-                    "Failed to create gap record",
-                error:
-                    gapError.message,
-                code:
-                    gapError.code || null,
-                details:
-                    gapError.details || null,
-                hint:
-                    gapError.hint || null
-            });
-        }
+    const {
+        data: closing,
+        error
+    } = await supabaseAdmin
+        .from("meter_readings")
+        .select(`
+            id,
+            station_id,
+            pump_id,
+            nozzle_id,
+            reading_type,
+            reading,
+            shift_id,
+            captured_at,
+            created_at,
+            recorded_by
+        `)
+        .eq(
+            "station_id",
+            stationId
+        )
+        .eq(
+            "pump_id",
+            pumpId
+        )
+        .eq(
+            "nozzle_id",
+            nozzleId
+        )
+        .eq(
+            "shift_id",
+            shiftId
+        )
+        .eq(
+            "reading_type",
+            "closing"
+        )
+        .gte(
+            "captured_at",
+            openingCapturedAt
+        )
+        .order(
+            "captured_at",
+            {
+                ascending: true
+            }
+        )
+        .limit(1)
+        .maybeSingle();
 
 
-        /* =====================================================
-           SUCCESS RESPONSE
-        ===================================================== */
+    if (error) {
+        throw error;
+    }
 
-        return res.status(201).json({
+
+    return closing || null;
+}
+
+
+/* =========================================================
+   FIND EXISTING GAP
+========================================================= */
+
+async function findExistingGap({
+    stationId,
+    pumpId,
+    nozzleId,
+    shiftId,
+    openingReading,
+    closingReading
+}) {
+
+    /*
+     * We use the reading values + same station/pump/nozzle/shift
+     * because older FuelGap databases may not yet contain
+     * opening_reading_id / closing_reading_id columns.
+     */
+
+    const {
+        data: existingGaps,
+        error
+    } = await supabaseAdmin
+        .from("gaps")
+        .select("*")
+        .eq(
+            "station_id",
+            stationId
+        )
+        .eq(
+            "pump_id",
+            pumpId
+        )
+        .eq(
+            "nozzle_id",
+            nozzleId
+        )
+        .eq(
+            "shift_id",
+            shiftId
+        )
+        .order(
+            "created_at",
+            {
+                ascending: false
+            }
+        )
+        .limit(50);
+
+
+    if (error) {
+        throw error;
+    }
+
+
+    const records =
+        existingGaps || [];
+
+
+    return records.find(
+        gap =>
+            Number(
+                gap.opening_reading
+            ) === Number(
+                openingReading
+            ) &&
+            Number(
+                gap.closing_reading
+            ) === Number(
+                closingReading
+            )
+    ) || null;
+}
+
+
+/* =========================================================
+   DETERMINE GAP STATUS
+========================================================= */
+
+function determineGapStatus(
+    meterGap
+) {
+
+    if (meterGap < 0) {
+        return "variance";
+    }
+
+    if (meterGap === 0) {
+        return "normal";
+    }
+
+    return "normal";
+}
+
+
+/* =========================================================
+   DETERMINE ALERT SEVERITY
+========================================================= */
+
+function determineAlertSeverity(
+    meterGap
+) {
+
+    /*
+     * Negative meter movement is abnormal because
+     * a cumulative meter should normally not go backwards.
+     */
+
+    if (meterGap < 0) {
+        return "critical";
+    }
+
+
+    /*
+     * Positive movement is still recorded as an alert
+     * because the user requested every calculated gap
+     * to be sent to Alerts.
+     */
+
+    if (meterGap > 0) {
+        return "warning";
+    }
+
+
+    /*
+     * Zero movement is informational.
+     */
+
+    return "info";
+}
+
+
+/* =========================================================
+   BUILD ALERT MESSAGE
+========================================================= */
+
+function buildGapAlert({
+    stationName,
+    meterGap,
+    openingReading,
+    closingReading
+}) {
+
+    const formattedGap =
+        Math.abs(
+            Number(meterGap)
+        ).toFixed(2);
+
+
+    if (meterGap < 0) {
+
+        return {
+
+            title:
+                "Meter Reading Variance Detected",
+
+            message:
+                `A negative meter movement was detected at ${stationName}. Opening reading: ${Number(openingReading).toFixed(2)} L. Closing reading: ${Number(closingReading).toFixed(2)} L. Calculated variance: -${formattedGap} L. Please review the meter readings.`
+
+        };
+    }
+
+
+    if (meterGap === 0) {
+
+        return {
+
+            title:
+                "Meter Reading Gap Recorded",
+
+            message:
+                `A meter gap of 0.00 L was recorded at ${stationName}. Opening reading: ${Number(openingReading).toFixed(2)} L. Closing reading: ${Number(closingReading).toFixed(2)} L.`
+
+        };
+    }
+
+
+    return {
+
+        title:
+            "Meter Gap Recorded",
+
+        message:
+            `A meter movement of ${formattedGap} L was recorded at ${stationName}. Opening reading: ${Number(openingReading).toFixed(2)} L. Closing reading: ${Number(closingReading).toFixed(2)} L. This calculation is based only on meter readings and does not use sales.`
+
+    };
+}
+
+
+/* =========================================================
+   PROCESS METER GAP
+========================================================= */
+
+async function processMeterGap({
+    organizationId,
+    stationId,
+    pumpId,
+    nozzleId,
+    shiftId,
+    readingType,
+    reading
+}) {
+
+    console.log(
+        "=============================================="
+    );
+
+    console.log(
+        "FUELGAP - PROCESS METER GAP"
+    );
+
+    console.log(
+        "=============================================="
+    );
+
+
+    if (!organizationId) {
+        throw new Error(
+            "Organization ID is required."
+        );
+    }
+
+
+    if (!stationId) {
+        throw new Error(
+            "Station ID is required."
+        );
+    }
+
+
+    if (!pumpId) {
+        throw new Error(
+            "Pump ID is required."
+        );
+    }
+
+
+    if (!nozzleId) {
+        throw new Error(
+            "Nozzle ID is required."
+        );
+    }
+
+
+    if (!shiftId) {
+        throw new Error(
+            "Shift ID is required."
+        );
+    }
+
+
+    if (!reading) {
+        throw new Error(
+            "Meter reading is required."
+        );
+    }
+
+
+    const normalizedReadingType =
+        normalizeRole(
+            readingType
+        );
+
+
+    /*
+     * Only opening and closing readings
+     * participate in automatic gap calculation.
+     */
+
+    if (
+        ![
+            "opening",
+            "closing"
+        ].includes(
+            normalizedReadingType
+        )
+    ) {
+
+        return {
 
             success: true,
 
-            message:
-                status === "normal"
-                    ? "Gap reconciliation completed successfully"
-                    : "Gap reconciliation completed with variance",
+            processed: false,
 
-            data: {
+            reason:
+                "Only opening and closing readings create meter gaps."
 
-                gap,
+        };
+    }
 
-                reconciliation: {
 
-                    station_id,
+    /* =====================================================
+       VERIFY STATION
+    ===================================================== */
 
-                    pump_id,
-
-                    nozzle_id,
-
-                    shift_id,
-
-                    opening_reading:
-                        openingReading,
-
-                    closing_reading:
-                        closingReading,
-
-                    meter_litres_sold:
-                        litresSold,
-
-                    actual_litres:
-                        actualLitres,
-
-                    litres_variance:
-                        litresVariance,
-
-                    price_per_litre:
-                        pricePerLitre,
-
-                    expected_sales:
-                        expectedSales,
-
-                    actual_sales:
-                        actualSales,
-
-                    gap_amount:
-                        gapAmount,
-
-                    status,
-
-                    sales_count:
-                        salesRecords.length
-                }
-            }
-        });
-
-    } catch (error) {
-
-        console.error(
-            "CREATE GAP EXCEPTION:",
-            error
+    const station =
+        await verifyStationAccess(
+            organizationId,
+            stationId
         );
 
-        return res.status(500).json({
-            success: false,
-            message:
-                "Server error while creating gap",
-            error:
-                error?.message || "Unknown server error",
-            code:
-                error?.code || null,
-            details:
-                error?.details || null,
-            hint:
-                error?.hint || null
-        });
-    }
-};
+
+    /* =====================================================
+       FIND PAIR
+    ===================================================== */
+
+    let openingReading = null;
+
+    let closingReading = null;
 
 
-/* =========================================================
-   GET ALL GAPS
-   GET /api/gaps
-========================================================= */
+    if (
+        normalizedReadingType ===
+        "closing"
+    ) {
 
-const getGaps = async (req, res) => {
-
-    try {
-
-        const {
-            station_id,
-            pump_id,
-            nozzle_id,
-            shift_id,
-            status,
-            date
-        } = req.query;
+        closingReading =
+            reading;
 
 
-        let query = supabaseAdmin
-            .from("gaps")
-            .select(`
-                id,
-                station_id,
-                pump_id,
-                nozzle_id,
-                shift_id,
-                opening_reading,
-                closing_reading,
-                litres_sold,
-                expected_sales,
-                actual_sales,
-                gap_amount,
-                status,
-                notes,
-                created_at
-            `)
-            .order("created_at", {
-                ascending: false
+        openingReading =
+            await findOpeningForClosing({
+
+                stationId,
+
+                pumpId,
+
+                nozzleId,
+
+                shiftId,
+
+                closingCapturedAt:
+                    reading.captured_at
+
             });
 
 
-        if (station_id) {
+    } else {
 
-            query = query.eq(
-                "station_id",
-                station_id
-            );
+        openingReading =
+            reading;
+
+
+        closingReading =
+            await findClosingForOpening({
+
+                stationId,
+
+                pumpId,
+
+                nozzleId,
+
+                shiftId,
+
+                openingCapturedAt:
+                    reading.captured_at
+
+            });
+    }
+
+
+    /* =====================================================
+       PAIR NOT READY
+    ===================================================== */
+
+    if (
+        !openingReading ||
+        !closingReading
+    ) {
+
+        console.log(
+            "FUELGAP - GAP PAIR NOT COMPLETE"
+        );
+
+
+        return {
+
+            success: true,
+
+            processed: false,
+
+            reason:
+                !openingReading
+                    ? "Waiting for matching opening reading."
+                    : "Waiting for matching closing reading.",
+
+            opening:
+                openingReading,
+
+            closing:
+                closingReading
+
+        };
+    }
+
+
+    /* =====================================================
+       VALIDATE ORDER
+    ===================================================== */
+
+    const openingTime =
+        new Date(
+            openingReading.captured_at
+        ).getTime();
+
+
+    const closingTime =
+        new Date(
+            closingReading.captured_at
+        ).getTime();
+
+
+    if (
+        closingTime <
+        openingTime
+    ) {
+
+        throw new Error(
+            "Closing reading cannot occur before the opening reading."
+        );
+    }
+
+
+    /* =====================================================
+       CALCULATE METER GAP
+    ===================================================== */
+
+    const openingValue =
+        Number(
+            openingReading.reading
+        );
+
+
+    const closingValue =
+        Number(
+            closingReading.reading
+        );
+
+
+    if (
+        !Number.isFinite(
+            openingValue
+        ) ||
+        !Number.isFinite(
+            closingValue
+        )
+    ) {
+
+        throw new Error(
+            "Opening or closing meter reading is not a valid number."
+        );
+    }
+
+
+    const meterGap =
+        Number(
+            (
+                closingValue -
+                openingValue
+            ).toFixed(2)
+        );
+
+
+    const gapStatus =
+        determineGapStatus(
+            meterGap
+        );
+
+
+    console.log(
+        "FUELGAP - METER GAP CALCULATION:",
+        {
+            opening:
+                openingValue,
+
+            closing:
+                closingValue,
+
+            gap:
+                meterGap,
+
+            status:
+                gapStatus
+        }
+    );
+
+
+    /* =====================================================
+       CHECK EXISTING GAP
+    ===================================================== */
+
+    const existingGap =
+        await findExistingGap({
+
+            stationId,
+
+            pumpId,
+
+            nozzleId,
+
+            shiftId,
+
+            openingReading:
+                openingValue,
+
+            closingReading:
+                closingValue
+
+        });
+
+
+    if (existingGap) {
+
+        console.log(
+            "FUELGAP - GAP ALREADY EXISTS:",
+            existingGap.id
+        );
+
+
+        return {
+
+            success: true,
+
+            processed: true,
+
+            duplicate: true,
+
+            gap:
+                existingGap
+
+        };
+    }
+
+
+    /* =====================================================
+       SAVE GAP
+       =====================================================
+
+       The existing gaps table in FuelGap was designed
+       around sales reconciliation.
+
+       To avoid breaking that existing database structure,
+       expected_sales and actual_sales are kept at 0.
+
+       They are NOT used for the meter-gap calculation.
+
+       gap_amount contains the calculated meter movement
+       so existing gap pages can continue reading it.
+    ===================================================== */
+
+    const {
+        data: createdGap,
+        error: gapError
+    } = await supabaseAdmin
+        .from("gaps")
+        .insert({
+
+            organization_id:
+                organizationId,
+
+            station_id:
+                stationId,
+
+            pump_id:
+                pumpId,
+
+            nozzle_id:
+                nozzleId,
+
+            shift_id:
+                shiftId,
+
+            expected_sales:
+                0,
+
+            actual_sales:
+                0,
+
+            gap_amount:
+                meterGap,
+
+            status:
+                gapStatus
+
+        })
+        .select("*")
+        .single();
+
+
+    if (gapError) {
+
+        console.error(
+            "FUELGAP - CREATE GAP ERROR:",
+            gapError
+        );
+
+        throw new Error(
+            `Unable to create meter gap: ${gapError.message}`
+        );
+    }
+
+
+    console.log(
+        "FUELGAP - GAP CREATED:",
+        createdGap.id
+    );
+
+
+    /* =====================================================
+       CREATE AUTOMATIC ALERT
+    ===================================================== */
+
+    const severity =
+        determineAlertSeverity(
+            meterGap
+        );
+
+
+    const alertContent =
+        buildGapAlert({
+
+            stationName:
+                station.name,
+
+            meterGap,
+
+            openingReading:
+                openingValue,
+
+            closingReading:
+                closingValue
+
+        });
+
+
+    let createdAlert = null;
+
+
+    try {
+
+        createdAlert =
+            await createSystemGapAlert({
+
+                organizationId,
+
+                stationId,
+
+                pumpId,
+
+                nozzleId,
+
+                shiftId,
+
+                gapId:
+                    createdGap.id,
+
+                severity,
+
+                title:
+                    alertContent.title,
+
+                message:
+                    alertContent.message
+
+            });
+
+
+        console.log(
+            "FUELGAP - GAP ALERT CREATED:",
+            createdAlert?.id
+        );
+
+
+    } catch (alertError) {
+
+        /*
+         * Gap has already been saved.
+         * We do not delete the gap if alert creation fails.
+         */
+
+        console.error(
+            "FUELGAP - AUTOMATIC ALERT CREATION ERROR:",
+            alertError
+        );
+    }
+
+
+    /* =====================================================
+       RETURN RESULT
+    ===================================================== */
+
+    return {
+
+        success: true,
+
+        processed: true,
+
+        duplicate: false,
+
+        gap:
+            createdGap,
+
+        alert:
+            createdAlert,
+
+        openingReading,
+
+        closingReading,
+
+        openingValue,
+
+        closingValue,
+
+        meterGap,
+
+        status:
+            gapStatus
+
+    };
+}
+
+
+/* =========================================================
+   GET GAPS
+   GET /api/gaps
+========================================================= */
+
+async function getGaps(
+    req,
+    res
+) {
+
+    try {
+
+        console.log(
+            "FUELGAP - GET GAPS"
+        );
+
+
+        if (
+            !req.user ||
+            !req.user.id
+        ) {
+
+            return res.status(401).json({
+                success: false,
+                message:
+                    "Authentication required"
+            });
         }
 
 
-        if (pump_id) {
-
-            query = query.eq(
-                "pump_id",
-                pump_id
+        const appUser =
+            await getApplicationUser(
+                req.user.id
             );
+
+
+        if (!appUser) {
+
+            return res.status(404).json({
+                success: false,
+                message:
+                    "Application user profile not found"
+            });
         }
 
 
-        if (nozzle_id) {
+        if (
+            appUser.is_active === false
+        ) {
 
-            query = query.eq(
-                "nozzle_id",
-                nozzle_id
-            );
+            return res.status(403).json({
+                success: false,
+                message:
+                    "Your account is inactive"
+            });
         }
 
 
-        if (shift_id) {
-
-            query = query.eq(
-                "shift_id",
-                shift_id
-            );
-        }
-
-
-        if (status) {
-
-            query = query.eq(
-                "status",
-                status
-            );
-        }
-
-
-        if (date) {
-
-            query = query
-                .gte(
-                    "created_at",
-                    `${date}T00:00:00`
+        let query =
+            supabaseAdmin
+                .from("gaps")
+                .select(`
+                    *,
+                    stations (
+                        id,
+                        name,
+                        address,
+                        city,
+                        state
+                    ),
+                    pumps (
+                        id,
+                        pump_number,
+                        brand,
+                        model
+                    ),
+                    nozzles (
+                        id,
+                        nozzle_number,
+                        product,
+                        price_per_litre
+                    ),
+                    shifts (
+                        id,
+                        shift_name,
+                        shift_date,
+                        status
+                    )
+                `)
+                .eq(
+                    "organization_id",
+                    appUser.organization_id
                 )
-                .lte(
+                .order(
                     "created_at",
-                    `${date}T23:59:59.999`
+                    {
+                        ascending: false
+                    }
+                );
+
+
+        const role =
+            normalizeRole(
+                appUser.role
+            );
+
+
+        if (
+            isRestrictedRole(role) &&
+            appUser.station_id
+        ) {
+
+            query =
+                query.eq(
+                    "station_id",
+                    appUser.station_id
                 );
         }
 
@@ -1509,23 +1179,50 @@ const getGaps = async (req, res) => {
             return res.status(500).json({
                 success: false,
                 message:
-                    "Failed to fetch gap records",
+                    "Unable to load gaps",
                 error:
                     error.message
             });
         }
 
 
+        const records =
+            gaps || [];
+
+
         return res.status(200).json({
 
             success: true,
 
-            data: {
+            message:
+                "Gaps loaded successfully",
 
-                gaps:
-                    gaps || []
+            data:
+                records,
+
+            summary: {
+
+                total:
+                    records.length,
+
+                normal:
+                    records.filter(
+                        gap =>
+                            gap.status ===
+                            "normal"
+                    ).length,
+
+                variance:
+                    records.filter(
+                        gap =>
+                            gap.status ===
+                            "variance"
+                    ).length
+
             }
+
         });
+
 
     } catch (error) {
 
@@ -1535,22 +1232,29 @@ const getGaps = async (req, res) => {
         );
 
         return res.status(500).json({
+
             success: false,
+
             message:
-                "Server error while fetching gaps",
+                "Unable to load gaps",
+
             error:
-                error?.message || "Unknown server error"
+                error.message
+
         });
     }
-};
+}
 
 
 /* =========================================================
-   GET GAP BY ID
+   GET SINGLE GAP
    GET /api/gaps/:id
 ========================================================= */
 
-const getGapById = async (req, res) => {
+async function getGapById(
+    req,
+    res
+) {
 
     try {
 
@@ -1569,42 +1273,85 @@ const getGapById = async (req, res) => {
         }
 
 
+        if (
+            !req.user ||
+            !req.user.id
+        ) {
+
+            return res.status(401).json({
+                success: false,
+                message:
+                    "Authentication required"
+            });
+        }
+
+
+        const appUser =
+            await getApplicationUser(
+                req.user.id
+            );
+
+
+        if (!appUser) {
+
+            return res.status(404).json({
+                success: false,
+                message:
+                    "Application user profile not found"
+            });
+        }
+
+
         const {
             data: gap,
             error
         } = await supabaseAdmin
             .from("gaps")
             .select(`
-                id,
-                station_id,
-                pump_id,
-                nozzle_id,
-                shift_id,
-                opening_reading,
-                closing_reading,
-                litres_sold,
-                expected_sales,
-                actual_sales,
-                gap_amount,
-                status,
-                notes,
-                created_at
+                *,
+                stations (
+                    id,
+                    name,
+                    address,
+                    city,
+                    state
+                ),
+                pumps (
+                    id,
+                    pump_number,
+                    brand,
+                    model
+                ),
+                nozzles (
+                    id,
+                    nozzle_number,
+                    product,
+                    price_per_litre
+                ),
+                shifts (
+                    id,
+                    shift_name,
+                    shift_date,
+                    status
+                )
             `)
-            .eq("id", id)
+            .eq(
+                "id",
+                id
+            )
+            .eq(
+                "organization_id",
+                appUser.organization_id
+            )
             .maybeSingle();
 
 
         if (error) {
 
-            console.error(
-                "GET GAP BY ID ERROR:",
-                error
-            );
-
             return res.status(500).json({
                 success: false,
                 message:
-                    "Failed to fetch gap record",
+                    "Unable to load gap",
                 error:
                     error.message
             });
@@ -1616,7 +1363,32 @@ const getGapById = async (req, res) => {
             return res.status(404).json({
                 success: false,
                 message:
-                    "Gap record not found"
+                    "Gap not found"
+            });
+        }
+
+
+        const role =
+            normalizeRole(
+                appUser.role
+            );
+
+
+        if (
+            isRestrictedRole(role) &&
+            appUser.station_id &&
+            String(
+                gap.station_id
+            ) !==
+            String(
+                appUser.station_id
+            )
+        ) {
+
+            return res.status(403).json({
+                success: false,
+                message:
+                    "You do not have access to this gap"
             });
         }
 
@@ -1625,28 +1397,288 @@ const getGapById = async (req, res) => {
 
             success: true,
 
-            data: {
-
+            data:
                 gap
-            }
+
         });
+
 
     } catch (error) {
 
         console.error(
-            "GET GAP EXCEPTION:",
+            "GET GAP BY ID EXCEPTION:",
             error
         );
 
         return res.status(500).json({
+
             success: false,
+
             message:
-                "Server error while fetching gap",
+                "Unable to load gap",
+
             error:
-                error?.message || "Unknown server error"
+                error.message
+
         });
     }
-};
+}
+
+
+/* =========================================================
+   MANUAL GAP PROCESSING
+   POST /api/gaps
+========================================================= */
+
+async function createGap(
+    req,
+    res
+) {
+
+    try {
+
+        if (
+            !req.user ||
+            !req.user.id
+        ) {
+
+            return res.status(401).json({
+                success: false,
+                message:
+                    "Authentication required"
+            });
+        }
+
+
+        const appUser =
+            await getApplicationUser(
+                req.user.id
+            );
+
+
+        if (!appUser) {
+
+            return res.status(404).json({
+                success: false,
+                message:
+                    "Application user profile not found"
+            });
+        }
+
+
+        if (
+            appUser.is_active === false
+        ) {
+
+            return res.status(403).json({
+                success: false,
+                message:
+                    "Your account is inactive"
+            });
+        }
+
+
+        const role =
+            normalizeRole(
+                appUser.role
+            );
+
+
+        if (
+            !isManagementRole(role)
+        ) {
+
+            return res.status(403).json({
+                success: false,
+                message:
+                    "Only management users can manually process gaps"
+            });
+        }
+
+
+        const {
+
+            station_id,
+
+            pump_id,
+
+            nozzle_id,
+
+            shift_id
+
+        } = req.body || {};
+
+
+        if (
+            !station_id ||
+            !pump_id ||
+            !nozzle_id ||
+            !shift_id
+        ) {
+
+            return res.status(400).json({
+                success: false,
+                message:
+                    "Station, pump, nozzle and shift are required"
+            });
+        }
+
+
+        const result =
+            await processMeterGap({
+
+                organizationId:
+                    appUser.organization_id,
+
+                stationId:
+                    station_id,
+
+                pumpId:
+                    pump_id,
+
+                nozzleId:
+                    nozzle_id,
+
+                shiftId:
+                    shift_id,
+
+                readingType:
+                    "closing",
+
+                reading:
+                    await getLatestClosingReading({
+
+                        stationId:
+                            station_id,
+
+                        pumpId:
+                            pump_id,
+
+                        nozzleId:
+                            nozzle_id,
+
+                        shiftId:
+                            shift_id
+
+                    })
+
+            });
+
+
+        return res.status(
+            result.processed
+                ? 201
+                : 200
+        ).json({
+
+            success: true,
+
+            message:
+                result.processed
+                    ? "Meter gap processed successfully"
+                    : result.reason,
+
+            data:
+                result
+
+        });
+
+
+    } catch (error) {
+
+        console.error(
+            "CREATE GAP EXCEPTION:",
+            error
+        );
+
+        return res.status(500).json({
+
+            success: false,
+
+            message:
+                "Unable to process meter gap",
+
+            error:
+                error.message
+
+        });
+    }
+}
+
+
+/* =========================================================
+   GET LATEST CLOSING READING
+========================================================= */
+
+async function getLatestClosingReading({
+    stationId,
+    pumpId,
+    nozzleId,
+    shiftId
+}) {
+
+    const {
+        data,
+        error
+    } = await supabaseAdmin
+        .from("meter_readings")
+        .select(`
+            id,
+            station_id,
+            pump_id,
+            nozzle_id,
+            reading_type,
+            reading,
+            shift_id,
+            captured_at,
+            created_at,
+            recorded_by
+        `)
+        .eq(
+            "station_id",
+            stationId
+        )
+        .eq(
+            "pump_id",
+            pumpId
+        )
+        .eq(
+            "nozzle_id",
+            nozzleId
+        )
+        .eq(
+            "shift_id",
+            shiftId
+        )
+        .eq(
+            "reading_type",
+            "closing"
+        )
+        .order(
+            "captured_at",
+            {
+                ascending: false
+            }
+        )
+        .limit(1)
+        .maybeSingle();
+
+
+    if (error) {
+        throw error;
+    }
+
+
+    if (!data) {
+
+        throw new Error(
+            "No closing meter reading was found for this shift."
+        );
+    }
+
+
+    return data;
+}
 
 
 /* =========================================================
@@ -1654,9 +1686,38 @@ const getGapById = async (req, res) => {
    DELETE /api/gaps/:id
 ========================================================= */
 
-const deleteGap = async (req, res) => {
+async function deleteGap(
+    req,
+    res
+) {
 
     try {
+
+        console.log(
+            "FUELGAP - DELETE GAP"
+        );
+
+
+        /* =====================================================
+           AUTHENTICATION
+        ===================================================== */
+
+        if (
+            !req.user ||
+            !req.user.id
+        ) {
+
+            return res.status(401).json({
+                success: false,
+                message:
+                    "Authentication required"
+            });
+        }
+
+
+        /* =====================================================
+           GAP ID
+        ===================================================== */
 
         const {
             id
@@ -1673,66 +1734,166 @@ const deleteGap = async (req, res) => {
         }
 
 
+        /* =====================================================
+           GET APPLICATION USER
+        ===================================================== */
+
+        const appUser =
+            await getApplicationUser(
+                req.user.id
+            );
+
+
+        if (!appUser) {
+
+            return res.status(404).json({
+                success: false,
+                message:
+                    "Application user profile not found"
+            });
+        }
+
+
+        /* =====================================================
+           ACTIVE ACCOUNT CHECK
+        ===================================================== */
+
+        if (
+            appUser.is_active === false
+        ) {
+
+            return res.status(403).json({
+                success: false,
+                message:
+                    "Your account is inactive"
+            });
+        }
+
+
+        /* =====================================================
+           ROLE CHECK
+        ===================================================== */
+
+        const role =
+            normalizeRole(
+                appUser.role
+            );
+
+
+        if (
+            !isManagementRole(role)
+        ) {
+
+            return res.status(403).json({
+                success: false,
+                message:
+                    "Only management users can delete gaps"
+            });
+        }
+
+
+        /* =====================================================
+           FIND GAP
+           ORGANIZATION ISOLATION
+        ===================================================== */
+
         const {
-            data: existingGap,
+            data: gap,
             error: findError
         } = await supabaseAdmin
             .from("gaps")
-            .select("id")
-            .eq("id", id)
+            .select(`
+                id,
+                organization_id,
+                station_id,
+                pump_id,
+                nozzle_id,
+                shift_id,
+                gap_amount,
+                status
+            `)
+            .eq(
+                "id",
+                id
+            )
+            .eq(
+                "organization_id",
+                appUser.organization_id
+            )
             .maybeSingle();
 
 
         if (findError) {
 
             console.error(
-                "FIND GAP ERROR:",
+                "FUELGAP - FIND GAP FOR DELETE ERROR:",
                 findError
             );
 
             return res.status(500).json({
                 success: false,
                 message:
-                    "Failed to find gap record",
+                    "Unable to find gap",
                 error:
                     findError.message
             });
         }
 
 
-        if (!existingGap) {
+        if (!gap) {
 
             return res.status(404).json({
                 success: false,
                 message:
-                    "Gap record not found"
+                    "Gap not found"
             });
         }
 
+
+        /* =====================================================
+           DELETE GAP
+        ===================================================== */
 
         const {
             error: deleteError
         } = await supabaseAdmin
             .from("gaps")
             .delete()
-            .eq("id", id);
+            .eq(
+                "id",
+                id
+            )
+            .eq(
+                "organization_id",
+                appUser.organization_id
+            );
 
 
         if (deleteError) {
 
             console.error(
-                "DELETE GAP ERROR:",
+                "FUELGAP - DELETE GAP ERROR:",
                 deleteError
             );
 
             return res.status(500).json({
                 success: false,
                 message:
-                    "Failed to delete gap record",
+                    "Unable to delete gap",
                 error:
                     deleteError.message
             });
         }
+
+
+        /* =====================================================
+           SUCCESS
+        ===================================================== */
+
+        console.log(
+            "FUELGAP - GAP DELETED:",
+            id
+        );
 
 
         return res.status(200).json({
@@ -1740,8 +1901,14 @@ const deleteGap = async (req, res) => {
             success: true,
 
             message:
-                "Gap record deleted successfully"
+                "Gap deleted successfully",
+
+            data: {
+                id: gap.id
+            }
+
         });
+
 
     } catch (error) {
 
@@ -1751,28 +1918,32 @@ const deleteGap = async (req, res) => {
         );
 
         return res.status(500).json({
+
             success: false,
+
             message:
-                "Server error while deleting gap",
+                "Unable to delete gap",
+
             error:
-                error?.message || "Unknown server error"
+                error.message
+
         });
     }
-};
-
+}
 
 /* =========================================================
-   EXPORT
+   EXPORTS
 ========================================================= */
 
 module.exports = {
-
-    createGap,
 
     getGaps,
 
     getGapById,
 
-    deleteGap
+    createGap,
+
+    processMeterGap,
+     deleteGap
 
 };

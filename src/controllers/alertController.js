@@ -1,24 +1,41 @@
 /* =========================================================
    FUELGAP - ALERT CONTROLLER
-   SUPABASE + EXPRESS
-   HTTPONLY COOKIE SESSION
-   PRODUCTION VERSION
+   =========================================================
+   PURPOSE:
+   - Get alerts
+   - Get single alert
+   - Create manual alerts
+   - Automatically create system gap alerts
+   - Acknowledge alerts
+   - Resolve alerts
+   - Delete alerts
+
+   SYSTEM ALERTS:
+   Gap calculations can automatically create alerts
+   without requiring the frontend to call POST /api/alerts.
 ========================================================= */
 
-const supabaseAdmin = require("../config/supabaseAdmin");
+const supabaseAdmin =
+    require("../config/supabaseAdmin");
 
 
 /* =========================================================
    HELPERS
 ========================================================= */
 
-async function getApplicationUser(authUserId) {
+async function getApplicationUser(
+    authUserId
+) {
 
     if (!authUserId) {
         return null;
     }
 
-    const { data, error } = await supabaseAdmin
+
+    const {
+        data,
+        error
+    } = await supabaseAdmin
         .from("users")
         .select(`
             id,
@@ -31,19 +48,31 @@ async function getApplicationUser(authUserId) {
             auth_user_id,
             station_id
         `)
-        .eq("auth_user_id", authUserId)
+        .eq(
+            "auth_user_id",
+            authUserId
+        )
         .maybeSingle();
 
+
     if (error) {
-        console.error("GET APPLICATION USER ERROR:", error);
+
+        console.error(
+            "GET APPLICATION USER ERROR:",
+            error
+        );
+
         throw error;
     }
+
 
     return data || null;
 }
 
 
-async function getAuthenticatedApplicationUser(req) {
+async function getAuthenticatedApplicationUser(
+    req
+) {
 
     const authUserId =
         req.user?.id ||
@@ -51,84 +80,370 @@ async function getAuthenticatedApplicationUser(req) {
         req.authUser?.id ||
         null;
 
+
     if (!authUserId) {
         return null;
     }
 
-    return getApplicationUser(authUserId);
-}
 
-
-function getOrganizationId(req, applicationUser) {
-
-    return (
-        req.organizationId ||
-        req.profile?.organization_id ||
-        req.user?.organization_id ||
-        applicationUser?.organization_id ||
-        null
+    return getApplicationUser(
+        authUserId
     );
 }
 
 
-function normalizeRole(role) {
+function getOrganizationId(
+    req,
+    applicationUser
+) {
 
-    return String(role || "")
+    return (
+
+        req.organizationId ||
+
+        req.profile?.organization_id ||
+
+        req.user?.organization_id ||
+
+        applicationUser?.organization_id ||
+
+        null
+
+    );
+}
+
+
+function normalizeRole(
+    role
+) {
+
+    return String(
+        role || ""
+    )
         .trim()
         .toLowerCase();
 }
 
 
-function isManagementRole(role) {
+function isManagementRole(
+    role
+) {
 
     return [
+
         "owner",
+
         "admin",
+
+        "super_admin",
+
         "manager"
-    ].includes(normalizeRole(role));
+
+    ].includes(
+        normalizeRole(role)
+    );
 }
 
 
-function isRestrictedRole(role) {
+function isRestrictedRole(
+    role
+) {
 
     return [
+
         "staff",
+
         "attendant"
-    ].includes(normalizeRole(role));
+
+    ].includes(
+        normalizeRole(role)
+    );
 }
 
 
-function cleanString(value) {
+function cleanString(
+    value
+) {
 
-    if (value === undefined || value === null) {
+    if (
+        value === undefined ||
+        value === null
+    ) {
         return "";
     }
 
-    return String(value).trim();
+
+    return String(
+        value
+    ).trim();
 }
 
 
-function normalizeStatus(value) {
+function normalizeStatus(
+    value
+) {
 
-    const status = cleanString(value).toLowerCase();
+    const status =
+        cleanString(value)
+            .toLowerCase();
+
 
     return status || "new";
 }
 
 
-function normalizeSeverity(value) {
+function normalizeSeverity(
+    value
+) {
 
-    const severity = cleanString(value).toLowerCase();
+    const severity =
+        cleanString(value)
+            .toLowerCase();
+
 
     return severity || "warning";
 }
 
 
-function normalizeType(value) {
+function normalizeType(
+    value
+) {
 
-    const type = cleanString(value).toLowerCase();
+    const type =
+        cleanString(value)
+            .toLowerCase();
+
 
     return type || "gap_variance";
+}
+
+
+/* =========================================================
+   CREATE SYSTEM GAP ALERT
+   =========================================================
+   INTERNAL FUNCTION
+
+   Used by gapController.
+
+   This is NOT an HTTP route.
+
+   It directly creates the alert in Supabase.
+========================================================= */
+
+async function createSystemGapAlert({
+
+    organizationId,
+
+    stationId,
+
+    pumpId,
+
+    nozzleId,
+
+    shiftId,
+
+    gapId,
+
+    severity = "warning",
+
+    title,
+
+    message
+
+}) {
+
+    console.log(
+        "=============================================="
+    );
+
+    console.log(
+        "FUELGAP - CREATE SYSTEM GAP ALERT"
+    );
+
+    console.log(
+        "=============================================="
+    );
+
+
+    if (!organizationId) {
+
+        throw new Error(
+            "Organization ID is required to create system alert."
+        );
+    }
+
+
+    if (!title) {
+
+        throw new Error(
+            "Alert title is required."
+        );
+    }
+
+
+    if (!message) {
+
+        throw new Error(
+            "Alert message is required."
+        );
+    }
+
+
+    const normalizedSeverity =
+        normalizeSeverity(
+            severity
+        );
+
+
+    const allowedSeverities = [
+
+        "info",
+
+        "warning",
+
+        "high",
+
+        "critical"
+
+    ];
+
+
+    if (
+        !allowedSeverities.includes(
+            normalizedSeverity
+        )
+    ) {
+
+        throw new Error(
+            "Invalid alert severity."
+        );
+    }
+
+
+    /* =====================================================
+       DUPLICATE PROTECTION
+    ===================================================== */
+
+    if (gapId) {
+
+        const {
+            data: existingAlerts,
+            error: duplicateError
+        } = await supabaseAdmin
+            .from("alerts")
+            .select("id")
+            .eq(
+                "organization_id",
+                organizationId
+            )
+            .eq(
+                "gap_id",
+                gapId
+            )
+            .limit(1);
+
+
+        if (duplicateError) {
+
+            console.error(
+                "CHECK EXISTING GAP ALERT ERROR:",
+                duplicateError
+            );
+
+            throw duplicateError;
+        }
+
+
+        if (
+            existingAlerts &&
+            existingAlerts.length > 0
+        ) {
+
+            console.log(
+                "SYSTEM GAP ALERT ALREADY EXISTS:",
+                existingAlerts[0].id
+            );
+
+
+            return existingAlerts[0];
+        }
+    }
+
+
+    /* =====================================================
+       INSERT ALERT
+    ===================================================== */
+
+    const insertData = {
+
+        organization_id:
+            organizationId,
+
+        station_id:
+            stationId || null,
+
+        pump_id:
+            pumpId || null,
+
+        nozzle_id:
+            nozzleId || null,
+
+        shift_id:
+            shiftId || null,
+
+        gap_id:
+            gapId || null,
+
+        type:
+            "gap_variance",
+
+        severity:
+            normalizedSeverity,
+
+        title:
+            cleanString(title),
+
+        message:
+            cleanString(message),
+
+        status:
+            "new"
+
+    };
+
+
+    const {
+        data: alert,
+        error
+    } = await supabaseAdmin
+        .from("alerts")
+        .insert(
+            insertData
+        )
+        .select()
+        .single();
+
+
+    if (error) {
+
+        console.error(
+            "CREATE SYSTEM GAP ALERT DATABASE ERROR:",
+            error
+        );
+
+        throw new Error(
+            `Failed to create system gap alert: ${error.message}`
+        );
+    }
+
+
+    console.log(
+        "SYSTEM GAP ALERT CREATED:",
+        alert.id
+    );
+
+
+    return alert;
 }
 
 
@@ -137,207 +452,236 @@ function normalizeType(value) {
    GET /api/alerts
 ========================================================= */
 
-async function getAlerts(req, res) {
+async function getAlerts(
+    req,
+    res
+) {
 
     try {
 
-        console.log("==============================================");
-        console.log("GET FUELGAP ALERTS");
-        console.log("==============================================");
+        console.log(
+            "=============================================="
+        );
+
+        console.log(
+            "GET FUELGAP ALERTS"
+        );
+
+        console.log(
+            "=============================================="
+        );
+
 
         const applicationUser =
-            await getAuthenticatedApplicationUser(req);
+            await getAuthenticatedApplicationUser(
+                req
+            );
+
 
         if (!applicationUser) {
 
             return res.status(401).json({
                 success: false,
-                message: "Authenticated application user not found."
+                message:
+                    "Authenticated application user not found."
             });
         }
 
 
-        if (applicationUser.is_active === false) {
+        if (
+            applicationUser.is_active === false
+        ) {
 
             return res.status(403).json({
                 success: false,
-                message: "Your account is inactive."
+                message:
+                    "Your account is inactive."
             });
         }
 
 
         const organizationId =
-            getOrganizationId(req, applicationUser);
+            getOrganizationId(
+                req,
+                applicationUser
+            );
+
 
         if (!organizationId) {
 
             return res.status(400).json({
                 success: false,
-                message: "Organization could not be determined."
+                message:
+                    "Organization could not be determined."
             });
         }
 
 
-        const role =
-            normalizeRole(applicationUser.role);
-
-
         const {
+
             station_id = "",
+
             severity = "",
+
             status = "",
+
             type = "",
+
             gap_id = "",
+
             shift_id = "",
+
             limit = "100"
+
         } = req.query;
 
 
-        let query = supabaseAdmin
-            .from("alerts")
-            .select(`
-                *,
-                stations (
-                    id,
-                    name,
-                    address,
-                    city,
-                    state
-                ),
-                pumps (
-                    id,
-                    pump_number,
-                    brand,
-                    model
-                ),
-                nozzles (
-                    id,
-                    nozzle_number,
-                    product,
-                    price_per_litre
-                ),
-                shifts (
-                    id,
-                    shift_name,
-                    shift_date,
-                    status
+        let query =
+            supabaseAdmin
+                .from("alerts")
+                .select(`
+                    *,
+                    stations (
+                        id,
+                        name,
+                        address,
+                        city,
+                        state
+                    ),
+                    pumps (
+                        id,
+                        pump_number,
+                        brand,
+                        model
+                    ),
+                    nozzles (
+                        id,
+                        nozzle_number,
+                        product,
+                        price_per_litre
+                    ),
+                    shifts (
+                        id,
+                        shift_name,
+                        shift_date,
+                        status
+                    )
+                `)
+                .eq(
+                    "organization_id",
+                    organizationId
                 )
-            `)
-            .eq("organization_id", organizationId)
-            .order("created_at", {
-                ascending: false
-            })
-            .limit(
-                Math.min(
-                    Math.max(parseInt(limit, 10) || 100, 1),
-                    500
+                .order(
+                    "created_at",
+                    {
+                        ascending: false
+                    }
                 )
+                .limit(
+                    Math.min(
+                        Math.max(
+                            parseInt(
+                                limit,
+                                10
+                            ) || 100,
+                            1
+                        ),
+                        500
+                    )
+                );
+
+
+        const role =
+            normalizeRole(
+                applicationUser.role
             );
 
-
-        /* =====================================================
-           RESTRICT STAFF / ATTENDANT
-        ===================================================== */
 
         if (
             isRestrictedRole(role) &&
             applicationUser.station_id
         ) {
 
-            query = query.eq(
-                "station_id",
-                applicationUser.station_id
-            );
+            query =
+                query.eq(
+                    "station_id",
+                    applicationUser.station_id
+                );
         }
 
-
-        /* =====================================================
-           STATION FILTER
-        ===================================================== */
 
         if (station_id) {
 
             if (
                 isRestrictedRole(role) &&
                 applicationUser.station_id &&
-                station_id !== applicationUser.station_id
+                station_id !==
+                    applicationUser.station_id
             ) {
 
                 return res.status(403).json({
                     success: false,
-                    message: "You do not have access to this station."
+                    message:
+                        "You do not have access to this station."
                 });
             }
 
-            query = query.eq(
-                "station_id",
-                station_id
-            );
+
+            query =
+                query.eq(
+                    "station_id",
+                    station_id
+                );
         }
 
-
-        /* =====================================================
-           STATUS FILTER
-        ===================================================== */
 
         if (status) {
 
-            query = query.eq(
-                "status",
-                status
-            );
+            query =
+                query.eq(
+                    "status",
+                    status
+                );
         }
 
-
-        /* =====================================================
-           SEVERITY FILTER
-        ===================================================== */
 
         if (severity) {
 
-            query = query.eq(
-                "severity",
-                severity
-            );
+            query =
+                query.eq(
+                    "severity",
+                    severity
+                );
         }
 
-
-        /* =====================================================
-           TYPE FILTER
-        ===================================================== */
 
         if (type) {
 
-            query = query.eq(
-                "type",
-                type
-            );
+            query =
+                query.eq(
+                    "type",
+                    type
+                );
         }
 
-
-        /* =====================================================
-           GAP FILTER
-        ===================================================== */
 
         if (gap_id) {
 
-            query = query.eq(
-                "gap_id",
-                gap_id
-            );
+            query =
+                query.eq(
+                    "gap_id",
+                    gap_id
+                );
         }
 
 
-        /* =====================================================
-           SHIFT FILTER
-        ===================================================== */
-
         if (shift_id) {
 
-            query = query.eq(
-                "shift_id",
-                shift_id
-            );
+            query =
+                query.eq(
+                    "shift_id",
+                    shift_id
+                );
         }
 
 
@@ -356,69 +700,89 @@ async function getAlerts(req, res) {
 
             return res.status(500).json({
                 success: false,
-                message: "Failed to load alerts.",
-                error: error.message
+                message:
+                    "Failed to load alerts.",
+                error:
+                    error.message
             });
         }
 
 
-        const records = alerts || [];
+        const records =
+            alerts || [];
 
-
-        /* =====================================================
-           SUMMARY
-        ===================================================== */
 
         const summary = {
 
-            total: records.length,
+            total:
+                records.length,
 
-            new: records.filter(
-                alert => alert.status === "new"
-            ).length,
+            new:
+                records.filter(
+                    alert =>
+                        alert.status ===
+                        "new"
+                ).length,
 
-            acknowledged: records.filter(
-                alert => alert.status === "acknowledged"
-            ).length,
+            acknowledged:
+                records.filter(
+                    alert =>
+                        alert.status ===
+                        "acknowledged"
+                ).length,
 
-            resolved: records.filter(
-                alert => alert.status === "resolved"
-            ).length,
+            resolved:
+                records.filter(
+                    alert =>
+                        alert.status ===
+                        "resolved"
+                ).length,
 
-            info: records.filter(
-                alert => alert.severity === "info"
-            ).length,
+            info:
+                records.filter(
+                    alert =>
+                        alert.severity ===
+                        "info"
+                ).length,
 
-            warning: records.filter(
-                alert => alert.severity === "warning"
-            ).length,
+            warning:
+                records.filter(
+                    alert =>
+                        alert.severity ===
+                        "warning"
+                ).length,
 
-            high: records.filter(
-                alert => alert.severity === "high"
-            ).length,
+            high:
+                records.filter(
+                    alert =>
+                        alert.severity ===
+                        "high"
+                ).length,
 
-            critical: records.filter(
-                alert => alert.severity === "critical"
-            ).length
+            critical:
+                records.filter(
+                    alert =>
+                        alert.severity ===
+                        "critical"
+                ).length
+
         };
-
-
-        console.log(
-            `ALERTS FOUND: ${records.length}`
-        );
 
 
         return res.status(200).json({
 
             success: true,
 
-            message: "Alerts loaded successfully.",
+            message:
+                "Alerts loaded successfully.",
 
-            data: records,
+            data:
+                records,
 
             summary
 
         });
+
 
     } catch (error) {
 
@@ -428,9 +792,15 @@ async function getAlerts(req, res) {
         );
 
         return res.status(500).json({
+
             success: false,
-            message: "Unable to load alerts.",
-            error: error.message
+
+            message:
+                "Unable to load alerts.",
+
+            error:
+                error.message
+
         });
     }
 }
@@ -441,50 +811,65 @@ async function getAlerts(req, res) {
    GET /api/alerts/:id
 ========================================================= */
 
-async function getAlertById(req, res) {
+async function getAlertById(
+    req,
+    res
+) {
 
     try {
 
-        const { id } = req.params;
+        const {
+            id
+        } = req.params;
 
 
         if (!id) {
 
             return res.status(400).json({
                 success: false,
-                message: "Alert ID is required."
+                message:
+                    "Alert ID is required."
             });
         }
 
 
         const applicationUser =
-            await getAuthenticatedApplicationUser(req);
+            await getAuthenticatedApplicationUser(
+                req
+            );
 
 
         if (!applicationUser) {
 
             return res.status(401).json({
                 success: false,
-                message: "Authenticated application user not found."
+                message:
+                    "Authenticated application user not found."
             });
         }
 
 
         const organizationId =
-            getOrganizationId(req, applicationUser);
+            getOrganizationId(
+                req,
+                applicationUser
+            );
 
 
         if (!organizationId) {
 
             return res.status(400).json({
                 success: false,
-                message: "Organization could not be determined."
+                message:
+                    "Organization could not be determined."
             });
         }
 
 
         const role =
-            normalizeRole(applicationUser.role);
+            normalizeRole(
+                applicationUser.role
+            );
 
 
         const {
@@ -520,22 +905,25 @@ async function getAlertById(req, res) {
                     status
                 )
             `)
-            .eq("id", id)
-            .eq("organization_id", organizationId)
+            .eq(
+                "id",
+                id
+            )
+            .eq(
+                "organization_id",
+                organizationId
+            )
             .maybeSingle();
 
 
         if (error) {
 
-            console.error(
-                "GET ALERT ERROR:",
-                error
-            );
-
             return res.status(500).json({
                 success: false,
-                message: "Failed to load alert.",
-                error: error.message
+                message:
+                    "Failed to load alert.",
+                error:
+                    error.message
             });
         }
 
@@ -544,7 +932,8 @@ async function getAlertById(req, res) {
 
             return res.status(404).json({
                 success: false,
-                message: "Alert not found."
+                message:
+                    "Alert not found."
             });
         }
 
@@ -552,12 +941,14 @@ async function getAlertById(req, res) {
         if (
             isRestrictedRole(role) &&
             applicationUser.station_id &&
-            alert.station_id !== applicationUser.station_id
+            alert.station_id !==
+                applicationUser.station_id
         ) {
 
             return res.status(403).json({
                 success: false,
-                message: "You do not have access to this alert."
+                message:
+                    "You do not have access to this alert."
             });
         }
 
@@ -566,11 +957,14 @@ async function getAlertById(req, res) {
 
             success: true,
 
-            message: "Alert loaded successfully.",
+            message:
+                "Alert loaded successfully.",
 
-            data: alert
+            data:
+                alert
 
         });
+
 
     } catch (error) {
 
@@ -580,77 +974,91 @@ async function getAlertById(req, res) {
         );
 
         return res.status(500).json({
+
             success: false,
-            message: "Unable to load alert.",
-            error: error.message
+
+            message:
+                "Unable to load alert.",
+
+            error:
+                error.message
+
         });
     }
 }
 
 
 /* =========================================================
-   CREATE ALERT
+   CREATE MANUAL ALERT
    POST /api/alerts
 ========================================================= */
 
-async function createAlert(req, res) {
+async function createAlert(
+    req,
+    res
+) {
 
     try {
 
-        console.log("==============================================");
-        console.log("CREATE FUELGAP ALERT");
-        console.log("==============================================");
-
-
         const applicationUser =
-            await getAuthenticatedApplicationUser(req);
+            await getAuthenticatedApplicationUser(
+                req
+            );
 
 
         if (!applicationUser) {
 
             return res.status(401).json({
                 success: false,
-                message: "Authenticated application user not found."
+                message:
+                    "Authenticated application user not found."
             });
         }
 
 
-        if (applicationUser.is_active === false) {
+        if (
+            applicationUser.is_active === false
+        ) {
 
             return res.status(403).json({
                 success: false,
-                message: "Your account is inactive."
+                message:
+                    "Your account is inactive."
             });
         }
 
 
         const organizationId =
-            getOrganizationId(req, applicationUser);
+            getOrganizationId(
+                req,
+                applicationUser
+            );
 
 
         if (!organizationId) {
 
             return res.status(400).json({
                 success: false,
-                message: "Organization could not be determined."
+                message:
+                    "Organization could not be determined."
             });
         }
 
 
         const role =
-            normalizeRole(applicationUser.role);
+            normalizeRole(
+                applicationUser.role
+            );
 
 
-        /*
-         * Alerts are normally generated by the system.
-         * Only management roles can manually create them.
-         */
-
-        if (!isManagementRole(role)) {
+        if (
+            !isManagementRole(role)
+        ) {
 
             return res.status(403).json({
                 success: false,
-                message: "Only management users can create alerts."
+                message:
+                    "Only management users can create alerts."
             });
         }
 
@@ -658,9 +1066,13 @@ async function createAlert(req, res) {
         const {
 
             station_id = null,
+
             pump_id = null,
+
             nozzle_id = null,
+
             shift_id = null,
+
             gap_id = null,
 
             type = "gap_variance",
@@ -680,7 +1092,8 @@ async function createAlert(req, res) {
 
             return res.status(400).json({
                 success: false,
-                message: "Alert title is required."
+                message:
+                    "Alert title is required."
             });
         }
 
@@ -689,26 +1102,36 @@ async function createAlert(req, res) {
 
             return res.status(400).json({
                 success: false,
-                message: "Alert message is required."
+                message:
+                    "Alert message is required."
             });
         }
 
 
         const normalizedSeverity =
-            normalizeSeverity(severity);
+            normalizeSeverity(
+                severity
+            );
 
 
         const allowedSeverities = [
+
             "info",
+
             "warning",
+
             "high",
+
             "critical"
+
         ];
 
 
-        if (!allowedSeverities.includes(
-            normalizedSeverity
-        )) {
+        if (
+            !allowedSeverities.includes(
+                normalizedSeverity
+            )
+        ) {
 
             return res.status(400).json({
                 success: false,
@@ -719,19 +1142,27 @@ async function createAlert(req, res) {
 
 
         const normalizedStatus =
-            normalizeStatus(status);
+            normalizeStatus(
+                status
+            );
 
 
         const allowedStatuses = [
+
             "new",
+
             "acknowledged",
+
             "resolved"
+
         ];
 
 
-        if (!allowedStatuses.includes(
-            normalizedStatus
-        )) {
+        if (
+            !allowedStatuses.includes(
+                normalizedStatus
+            )
+        ) {
 
             return res.status(400).json({
                 success: false,
@@ -741,10 +1172,6 @@ async function createAlert(req, res) {
         }
 
 
-        /*
-         * Verify station belongs to organization.
-         */
-
         if (station_id) {
 
             const {
@@ -753,7 +1180,10 @@ async function createAlert(req, res) {
             } = await supabaseAdmin
                 .from("stations")
                 .select("id")
-                .eq("id", station_id)
+                .eq(
+                    "id",
+                    station_id
+                )
                 .eq(
                     "organization_id",
                     organizationId
@@ -763,14 +1193,10 @@ async function createAlert(req, res) {
 
             if (stationError) {
 
-                console.error(
-                    "VERIFY ALERT STATION ERROR:",
-                    stationError
-                );
-
                 return res.status(500).json({
                     success: false,
-                    message: "Unable to verify station."
+                    message:
+                        "Unable to verify station."
                 });
             }
 
@@ -786,11 +1212,6 @@ async function createAlert(req, res) {
         }
 
 
-        /*
-         * If a gap is supplied, make sure it belongs
-         * to the same organization.
-         */
-
         if (gap_id) {
 
             const {
@@ -798,21 +1219,26 @@ async function createAlert(req, res) {
                 error: gapError
             } = await supabaseAdmin
                 .from("gaps")
-                .select("id, station_id")
-                .eq("id", gap_id)
+                .select(
+                    "id, station_id"
+                )
+                .eq(
+                    "id",
+                    gap_id
+                )
+                .eq(
+                    "organization_id",
+                    organizationId
+                )
                 .maybeSingle();
 
 
             if (gapError) {
 
-                console.error(
-                    "VERIFY ALERT GAP ERROR:",
-                    gapError
-                );
-
                 return res.status(500).json({
                     success: false,
-                    message: "Unable to verify gap."
+                    message:
+                        "Unable to verify gap."
                 });
             }
 
@@ -821,7 +1247,8 @@ async function createAlert(req, res) {
 
                 return res.status(400).json({
                     success: false,
-                    message: "The selected gap was not found."
+                    message:
+                        "The selected gap was not found."
                 });
             }
 
@@ -829,7 +1256,8 @@ async function createAlert(req, res) {
             if (
                 station_id &&
                 gap.station_id &&
-                gap.station_id !== station_id
+                gap.station_id !==
+                    station_id
             ) {
 
                 return res.status(400).json({
@@ -843,7 +1271,8 @@ async function createAlert(req, res) {
 
         const insertData = {
 
-            organization_id: organizationId,
+            organization_id:
+                organizationId,
 
             station_id:
                 station_id || null,
@@ -883,7 +1312,9 @@ async function createAlert(req, res) {
             error
         } = await supabaseAdmin
             .from("alerts")
-            .insert(insertData)
+            .insert(
+                insertData
+            )
             .select()
             .single();
 
@@ -897,8 +1328,10 @@ async function createAlert(req, res) {
 
             return res.status(500).json({
                 success: false,
-                message: "Failed to create alert.",
-                error: error.message
+                message:
+                    "Failed to create alert.",
+                error:
+                    error.message
             });
         }
 
@@ -907,11 +1340,14 @@ async function createAlert(req, res) {
 
             success: true,
 
-            message: "Alert created successfully.",
+            message:
+                "Alert created successfully.",
 
-            data: alert
+            data:
+                alert
 
         });
+
 
     } catch (error) {
 
@@ -921,9 +1357,15 @@ async function createAlert(req, res) {
         );
 
         return res.status(500).json({
+
             success: false,
-            message: "Unable to create alert.",
-            error: error.message
+
+            message:
+                "Unable to create alert.",
+
+            error:
+                error.message
+
         });
     }
 }
@@ -934,62 +1376,82 @@ async function createAlert(req, res) {
    PATCH /api/alerts/:id/acknowledge
 ========================================================= */
 
-async function acknowledgeAlert(req, res) {
+async function acknowledgeAlert(
+    req,
+    res
+) {
 
     try {
 
-        const { id } = req.params;
+        const {
+            id
+        } = req.params;
 
 
         if (!id) {
 
             return res.status(400).json({
                 success: false,
-                message: "Alert ID is required."
+                message:
+                    "Alert ID is required."
             });
         }
 
 
         const applicationUser =
-            await getAuthenticatedApplicationUser(req);
+            await getAuthenticatedApplicationUser(
+                req
+            );
 
 
         if (!applicationUser) {
 
             return res.status(401).json({
                 success: false,
-                message: "Authenticated application user not found."
+                message:
+                    "Authenticated application user not found."
             });
         }
 
 
-        if (applicationUser.is_active === false) {
+        if (
+            applicationUser.is_active === false
+        ) {
 
             return res.status(403).json({
                 success: false,
-                message: "Your account is inactive."
+                message:
+                    "Your account is inactive."
             });
         }
 
 
         const organizationId =
-            getOrganizationId(req, applicationUser);
+            getOrganizationId(
+                req,
+                applicationUser
+            );
 
 
         if (!organizationId) {
 
             return res.status(400).json({
                 success: false,
-                message: "Organization could not be determined."
+                message:
+                    "Organization could not be determined."
             });
         }
 
 
         const role =
-            normalizeRole(applicationUser.role);
+            normalizeRole(
+                applicationUser.role
+            );
 
 
-        if (!isManagementRole(role)) {
+        if (
+            !isManagementRole(role)
+        ) {
 
             return res.status(403).json({
                 success: false,
@@ -1005,7 +1467,10 @@ async function acknowledgeAlert(req, res) {
         } = await supabaseAdmin
             .from("alerts")
             .select("*")
-            .eq("id", id)
+            .eq(
+                "id",
+                id
+            )
             .eq(
                 "organization_id",
                 organizationId
@@ -1017,8 +1482,10 @@ async function acknowledgeAlert(req, res) {
 
             return res.status(500).json({
                 success: false,
-                message: "Failed to find alert.",
-                error: findError.message
+                message:
+                    "Failed to find alert.",
+                error:
+                    findError.message
             });
         }
 
@@ -1027,12 +1494,16 @@ async function acknowledgeAlert(req, res) {
 
             return res.status(404).json({
                 success: false,
-                message: "Alert not found."
+                message:
+                    "Alert not found."
             });
         }
 
 
-        if (existingAlert.status === "resolved") {
+        if (
+            existingAlert.status ===
+            "resolved"
+        ) {
 
             return res.status(400).json({
                 success: false,
@@ -1049,7 +1520,8 @@ async function acknowledgeAlert(req, res) {
             .from("alerts")
             .update({
 
-                status: "acknowledged",
+                status:
+                    "acknowledged",
 
                 acknowledged_at:
                     new Date().toISOString(),
@@ -1058,7 +1530,10 @@ async function acknowledgeAlert(req, res) {
                     applicationUser.id
 
             })
-            .eq("id", id)
+            .eq(
+                "id",
+                id
+            )
             .eq(
                 "organization_id",
                 organizationId
@@ -1069,16 +1544,12 @@ async function acknowledgeAlert(req, res) {
 
         if (error) {
 
-            console.error(
-                "ACKNOWLEDGE ALERT ERROR:",
-                error
-            );
-
             return res.status(500).json({
                 success: false,
                 message:
                     "Failed to acknowledge alert.",
-                error: error.message
+                error:
+                    error.message
             });
         }
 
@@ -1090,9 +1561,11 @@ async function acknowledgeAlert(req, res) {
             message:
                 "Alert acknowledged successfully.",
 
-            data: alert
+            data:
+                alert
 
         });
+
 
     } catch (error) {
 
@@ -1102,10 +1575,15 @@ async function acknowledgeAlert(req, res) {
         );
 
         return res.status(500).json({
+
             success: false,
+
             message:
                 "Unable to acknowledge alert.",
-            error: error.message
+
+            error:
+                error.message
+
         });
     }
 }
@@ -1116,62 +1594,82 @@ async function acknowledgeAlert(req, res) {
    PATCH /api/alerts/:id/resolve
 ========================================================= */
 
-async function resolveAlert(req, res) {
+async function resolveAlert(
+    req,
+    res
+) {
 
     try {
 
-        const { id } = req.params;
+        const {
+            id
+        } = req.params;
 
 
         if (!id) {
 
             return res.status(400).json({
                 success: false,
-                message: "Alert ID is required."
+                message:
+                    "Alert ID is required."
             });
         }
 
 
         const applicationUser =
-            await getAuthenticatedApplicationUser(req);
+            await getAuthenticatedApplicationUser(
+                req
+            );
 
 
         if (!applicationUser) {
 
             return res.status(401).json({
                 success: false,
-                message: "Authenticated application user not found."
+                message:
+                    "Authenticated application user not found."
             });
         }
 
 
-        if (applicationUser.is_active === false) {
+        if (
+            applicationUser.is_active === false
+        ) {
 
             return res.status(403).json({
                 success: false,
-                message: "Your account is inactive."
+                message:
+                    "Your account is inactive."
             });
         }
 
 
         const organizationId =
-            getOrganizationId(req, applicationUser);
+            getOrganizationId(
+                req,
+                applicationUser
+            );
 
 
         if (!organizationId) {
 
             return res.status(400).json({
                 success: false,
-                message: "Organization could not be determined."
+                message:
+                    "Organization could not be determined."
             });
         }
 
 
         const role =
-            normalizeRole(applicationUser.role);
+            normalizeRole(
+                applicationUser.role
+            );
 
 
-        if (!isManagementRole(role)) {
+        if (
+            !isManagementRole(role)
+        ) {
 
             return res.status(403).json({
                 success: false,
@@ -1187,7 +1685,10 @@ async function resolveAlert(req, res) {
         } = await supabaseAdmin
             .from("alerts")
             .select("*")
-            .eq("id", id)
+            .eq(
+                "id",
+                id
+            )
             .eq(
                 "organization_id",
                 organizationId
@@ -1199,8 +1700,10 @@ async function resolveAlert(req, res) {
 
             return res.status(500).json({
                 success: false,
-                message: "Failed to find alert.",
-                error: findError.message
+                message:
+                    "Failed to find alert.",
+                error:
+                    findError.message
             });
         }
 
@@ -1209,12 +1712,16 @@ async function resolveAlert(req, res) {
 
             return res.status(404).json({
                 success: false,
-                message: "Alert not found."
+                message:
+                    "Alert not found."
             });
         }
 
 
-        if (existingAlert.status === "resolved") {
+        if (
+            existingAlert.status ===
+            "resolved"
+        ) {
 
             return res.status(400).json({
                 success: false,
@@ -1231,7 +1738,8 @@ async function resolveAlert(req, res) {
             .from("alerts")
             .update({
 
-                status: "resolved",
+                status:
+                    "resolved",
 
                 resolved_at:
                     new Date().toISOString(),
@@ -1240,7 +1748,10 @@ async function resolveAlert(req, res) {
                     applicationUser.id
 
             })
-            .eq("id", id)
+            .eq(
+                "id",
+                id
+            )
             .eq(
                 "organization_id",
                 organizationId
@@ -1251,16 +1762,12 @@ async function resolveAlert(req, res) {
 
         if (error) {
 
-            console.error(
-                "RESOLVE ALERT ERROR:",
-                error
-            );
-
             return res.status(500).json({
                 success: false,
                 message:
                     "Failed to resolve alert.",
-                error: error.message
+                error:
+                    error.message
             });
         }
 
@@ -1272,9 +1779,11 @@ async function resolveAlert(req, res) {
             message:
                 "Alert resolved successfully.",
 
-            data: alert
+            data:
+                alert
 
         });
+
 
     } catch (error) {
 
@@ -1284,10 +1793,15 @@ async function resolveAlert(req, res) {
         );
 
         return res.status(500).json({
+
             success: false,
+
             message:
                 "Unable to resolve alert.",
-            error: error.message
+
+            error:
+                error.message
+
         });
     }
 }
@@ -1298,44 +1812,60 @@ async function resolveAlert(req, res) {
    DELETE /api/alerts/:id
 ========================================================= */
 
-async function deleteAlert(req, res) {
+async function deleteAlert(
+    req,
+    res
+) {
 
     try {
 
-        const { id } = req.params;
+        const {
+            id
+        } = req.params;
 
 
         if (!id) {
 
             return res.status(400).json({
                 success: false,
-                message: "Alert ID is required."
+                message:
+                    "Alert ID is required."
             });
         }
 
 
         const applicationUser =
-            await getAuthenticatedApplicationUser(req);
+            await getAuthenticatedApplicationUser(
+                req
+            );
 
 
         if (!applicationUser) {
 
             return res.status(401).json({
                 success: false,
-                message: "Authenticated application user not found."
+                message:
+                    "Authenticated application user not found."
             });
         }
 
 
         const organizationId =
-            getOrganizationId(req, applicationUser);
+            getOrganizationId(
+                req,
+                applicationUser
+            );
 
 
         const role =
-            normalizeRole(applicationUser.role);
+            normalizeRole(
+                applicationUser.role
+            );
 
 
-        if (!isManagementRole(role)) {
+        if (
+            !isManagementRole(role)
+        ) {
 
             return res.status(403).json({
                 success: false,
@@ -1349,7 +1879,8 @@ async function deleteAlert(req, res) {
 
             return res.status(400).json({
                 success: false,
-                message: "Organization could not be determined."
+                message:
+                    "Organization could not be determined."
             });
         }
 
@@ -1360,7 +1891,10 @@ async function deleteAlert(req, res) {
         } = await supabaseAdmin
             .from("alerts")
             .select("id")
-            .eq("id", id)
+            .eq(
+                "id",
+                id
+            )
             .eq(
                 "organization_id",
                 organizationId
@@ -1372,8 +1906,10 @@ async function deleteAlert(req, res) {
 
             return res.status(500).json({
                 success: false,
-                message: "Failed to find alert.",
-                error: findError.message
+                message:
+                    "Failed to find alert.",
+                error:
+                    findError.message
             });
         }
 
@@ -1382,7 +1918,8 @@ async function deleteAlert(req, res) {
 
             return res.status(404).json({
                 success: false,
-                message: "Alert not found."
+                message:
+                    "Alert not found."
             });
         }
 
@@ -1392,7 +1929,10 @@ async function deleteAlert(req, res) {
         } = await supabaseAdmin
             .from("alerts")
             .delete()
-            .eq("id", id)
+            .eq(
+                "id",
+                id
+            )
             .eq(
                 "organization_id",
                 organizationId
@@ -1401,15 +1941,12 @@ async function deleteAlert(req, res) {
 
         if (error) {
 
-            console.error(
-                "DELETE ALERT ERROR:",
-                error
-            );
-
             return res.status(500).json({
                 success: false,
-                message: "Failed to delete alert.",
-                error: error.message
+                message:
+                    "Failed to delete alert.",
+                error:
+                    error.message
             });
         }
 
@@ -1423,6 +1960,7 @@ async function deleteAlert(req, res) {
 
         });
 
+
     } catch (error) {
 
         console.error(
@@ -1431,17 +1969,22 @@ async function deleteAlert(req, res) {
         );
 
         return res.status(500).json({
+
             success: false,
+
             message:
                 "Unable to delete alert.",
-            error: error.message
+
+            error:
+                error.message
+
         });
     }
 }
 
 
 /* =========================================================
-   EXPORT CONTROLLERS
+   EXPORTS
 ========================================================= */
 
 module.exports = {
@@ -1451,6 +1994,8 @@ module.exports = {
     getAlertById,
 
     createAlert,
+
+    createSystemGapAlert,
 
     acknowledgeAlert,
 
