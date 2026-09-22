@@ -123,8 +123,8 @@ function userCanAccessStation(
         }
 
         return (
-            appUser.station_id ===
-            stationId
+            String(appUser.station_id) ===
+            String(stationId)
         );
     }
 
@@ -385,9 +385,14 @@ async function createMeterReading(
 
         /* =====================================================
            CAPTURED DATE
-           
+
            Historical readings are supported.
-           If captured_at is omitted, current time is used.
+
+           If captured_at is omitted,
+           current time is used.
+
+           This allows older meter records
+           to be entered manually.
            ===================================================== */
 
         let finalCapturedAt =
@@ -428,10 +433,14 @@ async function createMeterReading(
 
         /* =====================================================
            STATION
-           
+
            IMPORTANT:
-           stations table uses `is_active`,
-           NOT `status`.
+
+           stations table uses:
+               is_active
+
+           NOT:
+               status
            ===================================================== */
 
         console.log(
@@ -518,8 +527,8 @@ async function createMeterReading(
 
         if (
             !appUser.organization_id ||
-            station.organization_id !==
-                appUser.organization_id
+            String(station.organization_id) !==
+                String(appUser.organization_id)
         ) {
 
             return res.status(403).json({
@@ -536,8 +545,6 @@ async function createMeterReading(
 
         /* =====================================================
            STATION STATUS
-           
-           Database uses boolean `is_active`.
            ===================================================== */
 
         if (
@@ -581,6 +588,14 @@ async function createMeterReading(
 
         /* =====================================================
            PUMP
+
+           IMPORTANT:
+
+           pumps table uses:
+               is_active
+
+           NOT:
+               status
            ===================================================== */
 
         console.log(
@@ -600,7 +615,7 @@ async function createMeterReading(
                 pump_number,
                 brand,
                 model,
-                status
+                is_active
             `)
             .eq(
                 "id",
@@ -646,8 +661,8 @@ async function createMeterReading(
 
 
         if (
-            pump.station_id !==
-            station_id
+            String(pump.station_id) !==
+            String(station_id)
         ) {
 
             return res.status(400).json({
@@ -662,12 +677,14 @@ async function createMeterReading(
         }
 
 
+        /* =====================================================
+           PUMP ACTIVE CHECK
+
+           Database uses boolean is_active.
+           ===================================================== */
+
         if (
-            pump.status &&
-            String(
-                pump.status
-            ).toLowerCase() ===
-                "inactive"
+            pump.is_active === false
         ) {
 
             return res.status(400).json({
@@ -684,12 +701,31 @@ async function createMeterReading(
 
         console.log(
             "PUMP VERIFIED:",
-            pump.id
+            {
+                id:
+                    pump.id,
+
+                pump_number:
+                    pump.pump_number,
+
+                is_active:
+                    pump.is_active
+            }
         );
 
 
         /* =====================================================
            NOZZLE
+
+           IMPORTANT:
+
+           nozzles table uses:
+               product
+               is_active
+
+           NOT:
+               fuel_type
+               status
            ===================================================== */
 
         console.log(
@@ -707,9 +743,9 @@ async function createMeterReading(
                 id,
                 pump_id,
                 nozzle_number,
-                fuel_type,
+                product,
                 price_per_litre,
-                status
+                is_active
             `)
             .eq(
                 "id",
@@ -755,8 +791,8 @@ async function createMeterReading(
 
 
         if (
-            nozzle.pump_id !==
-            pump_id
+            String(nozzle.pump_id) !==
+            String(pump_id)
         ) {
 
             return res.status(400).json({
@@ -771,12 +807,14 @@ async function createMeterReading(
         }
 
 
+        /* =====================================================
+           NOZZLE ACTIVE CHECK
+
+           Database uses boolean is_active.
+           ===================================================== */
+
         if (
-            nozzle.status &&
-            String(
-                nozzle.status
-            ).toLowerCase() ===
-                "inactive"
+            nozzle.is_active === false
         ) {
 
             return res.status(400).json({
@@ -793,7 +831,19 @@ async function createMeterReading(
 
         console.log(
             "NOZZLE VERIFIED:",
-            nozzle.id
+            {
+                id:
+                    nozzle.id,
+
+                nozzle_number:
+                    nozzle.nozzle_number,
+
+                product:
+                    nozzle.product,
+
+                is_active:
+                    nozzle.is_active
+            }
         );
 
 
@@ -870,8 +920,8 @@ async function createMeterReading(
 
 
             if (
-                shift.station_id !==
-                station_id
+                String(shift.station_id) !==
+                String(station_id)
             ) {
 
                 return res.status(400).json({
@@ -890,33 +940,55 @@ async function createMeterReading(
                 shift.status
                     ? String(
                         shift.status
-                    ).toLowerCase()
+                    ).trim().toLowerCase()
                     : "";
 
 
+            /* =================================================
+               SHIFT STATUS
+
+               Your shifts table uses:
+
+               scheduled
+               open
+               closed
+               cancelled
+
+               For normal meter readings:
+               - open = allowed
+               - closed = allowed
+
+               Closed is allowed because historical
+               meter readings can be entered later.
+
+               Correction readings do not require
+               an active shift.
+               ================================================= */
+
             if (
                 normalizedReadingType !==
-                    "correction" &&
-                shiftStatus &&
-                ![
-                    "open",
-                    "active",
-                    "ongoing",
-                    "closed",
-                    "completed"
-                ].includes(
-                    shiftStatus
-                )
+                    "correction"
             ) {
 
-                return res.status(400).json({
+                if (
+                    ![
+                        "open",
+                        "closed"
+                    ].includes(
+                        shiftStatus
+                    )
+                ) {
 
-                    success: false,
+                    return res.status(400).json({
 
-                    message:
-                        "The selected shift is not available for meter readings"
+                        success: false,
 
-                });
+                        message:
+                            "The selected shift must be open or closed for this meter reading"
+
+                    });
+
+                }
 
             }
 
@@ -927,7 +999,19 @@ async function createMeterReading(
 
             console.log(
                 "SHIFT VERIFIED:",
-                shift.id
+                {
+                    id:
+                        shift.id,
+
+                    shift_name:
+                        shift.shift_name,
+
+                    shift_date:
+                        shift.shift_date,
+
+                    status:
+                        shift.status
+                }
             );
 
         }
@@ -935,28 +1019,37 @@ async function createMeterReading(
 
         /* =====================================================
            PHOTO URL
-           
+
            Evidence is OPTIONAL.
+
+           A reading can be created with:
+               photo_url = null
+
+           This supports older records and
+           historical gap entries.
            ===================================================== */
 
         let finalPhotoUrl =
             null;
 
 
-        if (photo_url) {
+        if (
+            photo_url !== undefined &&
+            photo_url !== null
+        ) {
 
-            finalPhotoUrl =
+            const cleanedPhotoUrl =
                 String(
                     photo_url
                 ).trim();
 
 
             if (
-                finalPhotoUrl.length === 0
+                cleanedPhotoUrl.length > 0
             ) {
 
                 finalPhotoUrl =
-                    null;
+                    cleanedPhotoUrl;
 
             }
 
@@ -1643,8 +1736,8 @@ async function getMeterReadingById(
            ===================================================== */
 
         if (
-            station.organization_id !==
-            appUser.organization_id
+            String(station.organization_id) !==
+            String(appUser.organization_id)
         ) {
 
             return res.status(403).json({
@@ -1963,8 +2056,8 @@ async function deleteMeterReading(
            ===================================================== */
 
         if (
-            station.organization_id !==
-            appUser.organization_id
+            String(station.organization_id) !==
+            String(appUser.organization_id)
         ) {
 
             return res.status(403).json({
