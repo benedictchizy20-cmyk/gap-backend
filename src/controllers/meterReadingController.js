@@ -17,6 +17,194 @@
    ========================================================= */
 
 const supabaseAdmin = require("../config/supabaseAdmin");
+const crypto = require("crypto");
+
+/* =========================================================
+   SUPABASE STORAGE - METER EVIDENCE
+   ========================================================= */
+
+const METER_EVIDENCE_BUCKET = "meter-evidence";
+
+
+/* =========================================================
+   UPLOAD EVIDENCE TO STORAGE
+   ========================================================= */
+
+async function uploadMeterEvidence(
+    evidenceData,
+    stationId,
+    readingType
+) {
+    if (!evidenceData) {
+        return null;
+    }
+
+    const value = String(evidenceData).trim();
+
+    /* -----------------------------------------------------
+       If it is already a normal URL, keep it
+       ----------------------------------------------------- */
+
+    if (
+        value.startsWith("http://") ||
+        value.startsWith("https://")
+    ) {
+        return value;
+    }
+
+
+    /* -----------------------------------------------------
+       Validate Base64 image data URL
+       ----------------------------------------------------- */
+
+    const match = value.match(
+        /^data:(image\/[a-zA-Z0-9.+-]+);base64,(.+)$/
+    );
+
+    if (!match) {
+        throw new Error(
+            "Invalid meter evidence image format"
+        );
+    }
+
+
+    const contentType = match[1];
+    const base64Data = match[2];
+
+
+    /* -----------------------------------------------------
+       Convert Base64 to Buffer
+       ----------------------------------------------------- */
+
+    let fileBuffer;
+
+    try {
+        fileBuffer = Buffer.from(
+            base64Data,
+            "base64"
+        );
+    } catch (error) {
+        throw new Error(
+            "Unable to process meter evidence image"
+        );
+    }
+
+
+    if (!fileBuffer || fileBuffer.length === 0) {
+        throw new Error(
+            "Meter evidence image is empty"
+        );
+    }
+
+
+    /* -----------------------------------------------------
+       Maximum image size: 5 MB
+       ----------------------------------------------------- */
+
+    const MAX_FILE_SIZE = 5 * 1024 * 1024;
+
+    if (fileBuffer.length > MAX_FILE_SIZE) {
+        throw new Error(
+            "Meter evidence image must not exceed 5MB"
+        );
+    }
+
+
+    /* -----------------------------------------------------
+       Determine file extension
+       ----------------------------------------------------- */
+
+    const extensionMap = {
+        "image/jpeg": "jpg",
+        "image/jpg": "jpg",
+        "image/png": "png",
+        "image/webp": "webp",
+        "image/gif": "gif"
+    };
+
+    const extension =
+        extensionMap[contentType] || "jpg";
+
+
+    /* -----------------------------------------------------
+       Unique Storage path
+       ----------------------------------------------------- */
+
+    const fileName =
+        `${Date.now()}-${crypto.randomUUID()}.${extension}`;
+
+    const storagePath =
+        `meter-readings/${stationId}/${readingType}/${fileName}`;
+
+
+    /* -----------------------------------------------------
+       Upload to Supabase Storage
+       ----------------------------------------------------- */
+
+    console.log(
+        "FUELGAP - UPLOADING METER EVIDENCE:",
+        storagePath
+    );
+
+    const {
+        error: uploadError
+    } = await supabaseAdmin
+        .storage
+        .from(METER_EVIDENCE_BUCKET)
+        .upload(
+            storagePath,
+            fileBuffer,
+            {
+                contentType,
+                upsert: false,
+                cacheControl: "3600"
+            }
+        );
+
+
+    if (uploadError) {
+        console.error(
+            "METER EVIDENCE STORAGE UPLOAD ERROR:",
+            uploadError
+        );
+
+        throw new Error(
+            `Unable to upload meter evidence: ${uploadError.message}`
+        );
+    }
+
+
+    /* -----------------------------------------------------
+       Get public URL
+       ----------------------------------------------------- */
+
+    const {
+        data: publicUrlData
+    } = supabaseAdmin
+        .storage
+        .from(METER_EVIDENCE_BUCKET)
+        .getPublicUrl(storagePath);
+
+
+    const publicUrl =
+        publicUrlData?.publicUrl || null;
+
+
+    if (!publicUrl) {
+        throw new Error(
+            "Unable to generate meter evidence URL"
+        );
+    }
+
+
+    console.log(
+        "FUELGAP - METER EVIDENCE UPLOADED:",
+        publicUrl
+    );
+
+
+    return publicUrl;
+}
 
 /* =========================================================
    HELPERS
@@ -630,16 +818,46 @@ const createMeterReading = async (req, res) => {
            - null
            - empty
            ===================================================== */
+/* =====================================================
+   PHOTO / EVIDENCE
+   =====================================================
+   Evidence is OPTIONAL.
 
-        let finalPhotoUrl = null;
+   The frontend may send:
+   - Base64 image data
+   - Normal HTTP/HTTPS image URL
+   - null
+   - empty
 
-        if (
-            photo_url !== undefined &&
-            photo_url !== null &&
-            String(photo_url).trim() !== ""
-        ) {
-            finalPhotoUrl = String(photo_url).trim();
-        }
+   Base64 images are uploaded to Supabase Storage.
+   Only the public URL is saved in photo_url.
+   ===================================================== */
+
+let finalPhotoUrl = null;
+
+if (
+    photo_url !== undefined &&
+    photo_url !== null &&
+    String(photo_url).trim() !== ""
+) {
+    try {
+        finalPhotoUrl = await uploadMeterEvidence(
+            photo_url,
+            station_id,
+            normalizedReadingType
+        );
+    } catch (error) {
+        console.error(
+            "METER EVIDENCE PROCESSING ERROR:",
+            error
+        );
+
+        return res.status(400).json({
+            success: false,
+            message: error.message
+        });
+    }
+}
 
 
         /* =====================================================
