@@ -10,7 +10,8 @@ const {
     createMeterReading,
     getMeterReadings,
     getMeterReadingById,
-    deleteMeterReading
+    deleteMeterReading,
+     backfillMeterGap
 } = require("../controllers/meterReadingController");
 
 const {
@@ -30,6 +31,11 @@ router.post(
     "/",
     requireAuth,
     createMeterReading
+);
+router.post(
+    "/:id/backfill-gap",
+    requireAuth,
+    backfillMeterGap
 );
 
 

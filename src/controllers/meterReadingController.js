@@ -1970,6 +1970,178 @@ const deleteMeterReading = async (
     }
 };
 
+/* =========================================================
+   BACKFILL EXISTING METER READING GAP
+   ========================================================= */
+
+const backfillMeterGap = async (req, res) => {
+    try {
+        console.log("========================================");
+        console.log("FUELGAP - BACKFILL METER GAP");
+        console.log("========================================");
+
+        const authUserId = req.user?.id;
+
+        if (!authUserId) {
+            return res.status(401).json({
+                success: false,
+                message: "Authentication required"
+            });
+        }
+
+        const appUser = await getApplicationUser(authUserId);
+
+        if (!appUser) {
+            return res.status(404).json({
+                success: false,
+                message: "Application user not found"
+            });
+        }
+
+        if (!appUser.is_active) {
+            return res.status(403).json({
+                success: false,
+                message: "User account is inactive"
+            });
+        }
+
+        /*
+         * Only management users can backfill gaps.
+         */
+        const role = normalizeRole(appUser.role);
+
+        if (!isOrganizationWideRole(role)) {
+            return res.status(403).json({
+                success: false,
+                message: "You do not have permission to backfill meter gaps"
+            });
+        }
+
+        const { reading_id } = req.params;
+
+        if (!reading_id) {
+            return res.status(400).json({
+                success: false,
+                message: "Closing meter reading ID is required"
+            });
+        }
+
+        /*
+         * Get the existing closing reading.
+         */
+        const { data: closingReading, error: closingError } =
+            await supabaseAdmin
+                .from("meter_readings")
+                .select(`
+                    id,
+                    organization_id,
+                    station_id,
+                    pump_id,
+                    nozzle_id,
+                    shift_id,
+                    reading_type,
+                    reading,
+                    captured_at,
+                    recorded_by
+                `)
+                .eq("id", reading_id)
+                .maybeSingle();
+
+        if (closingError) {
+            console.error(
+                "BACKFILL CLOSING READING ERROR:",
+                closingError
+            );
+
+            return res.status(500).json({
+                success: false,
+                message: "Failed to retrieve closing meter reading",
+                error: closingError.message
+            });
+        }
+
+        if (!closingReading) {
+            return res.status(404).json({
+                success: false,
+                message: "Meter reading not found"
+            });
+        }
+
+        /*
+         * Make sure this is actually a closing reading.
+         */
+        if (closingReading.reading_type !== "closing") {
+            return res.status(400).json({
+                success: false,
+                message: "The selected meter reading is not a closing reading"
+            });
+        }
+
+        /*
+         * Make sure the reading belongs to the
+         * authenticated user's organization.
+         */
+        if (
+            closingReading.organization_id !==
+            appUser.organization_id
+        ) {
+            return res.status(403).json({
+                success: false,
+                message: "You cannot process a reading from another organization"
+            });
+        }
+
+        console.log("CLOSING READING:", closingReading.id);
+        console.log("CLOSING VALUE:", closingReading.reading);
+        console.log("STATION:", closingReading.station_id);
+        console.log("PUMP:", closingReading.pump_id);
+        console.log("NOZZLE:", closingReading.nozzle_id);
+        console.log("SHIFT:", closingReading.shift_id);
+
+        /*
+         * Send the existing closing reading through
+         * the SAME gap calculation used for new readings.
+         */
+        const gapResult = await processMeterGap({
+            organizationId: appUser.organization_id,
+            stationId: closingReading.station_id,
+            pumpId: closingReading.pump_id,
+            nozzleId: closingReading.nozzle_id,
+            shiftId: closingReading.shift_id,
+            readingType: "closing",
+            reading: closingReading,
+            recordedBy: appUser.id
+        });
+
+        console.log(
+            "FUELGAP - BACKFILL GAP RESULT:",
+            gapResult
+        );
+
+        return res.status(200).json({
+            success: true,
+            message: "Existing meter gap processed successfully",
+            data: {
+                closing_reading: closingReading,
+                gap: gapResult
+            }
+        });
+
+    } catch (error) {
+
+        console.error(
+            "FUELGAP - BACKFILL GAP ERROR:",
+            error
+        );
+
+        return res.status(500).json({
+            success: false,
+            message: "Failed to process existing meter gap",
+            error: error.message
+        });
+    }
+};
+
 
 /* =========================================================
    EXPORTS
@@ -1983,6 +2155,7 @@ module.exports = {
 
     getMeterReadingById,
 
-    deleteMeterReading
+    deleteMeterReading,
+     backfillMeterGap
 
 };
