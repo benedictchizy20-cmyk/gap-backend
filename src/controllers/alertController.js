@@ -536,61 +536,20 @@ async function getAlerts(
         } = req.query;
 
 
-        let query =
-            supabaseAdmin
-                .from("alerts")
-                .select(`
-                    *,
-                    stations (
-                        id,
-                        name,
-                        address,
-                        city,
-                        state
-                    ),
-                    pumps (
-                        id,
-                        pump_number,
-                        brand,
-                        model
-                    ),
-                    nozzles (
-                        id,
-                        nozzle_number,
-                        product,
-                        price_per_litre
-                    ),
-                    shifts (
-                        id,
-                        shift_name,
-                        shift_date,
-                        status
-                    )
-                `)
-                .eq(
-                    "organization_id",
-                    organizationId
-                )
-                .order(
-                    "created_at",
-                    {
-                        ascending: false
-                    }
-                )
-                .limit(
-                    Math.min(
-                        Math.max(
-                            parseInt(
-                                limit,
-                                10
-                            ) || 100,
-                            1
-                        ),
-                        500
-                    )
-                );
-
-
+            let query =
+    supabaseAdmin
+        .from("alerts")
+        .select("*")
+        .eq(
+            "organization_id",
+            appUser.organization_id
+        )
+        .order(
+            "created_at",
+            {
+                ascending: false
+            }
+        );
         const role =
             normalizeRole(
                 applicationUser.role
@@ -1982,6 +1941,157 @@ async function deleteAlert(
     }
 }
 
+/* =========================================================
+   CREATE SYSTEM GAP ALERT
+   =========================================================
+   PURPOSE:
+   - Automatically create an alert when a meter gap is created
+   - Called internally by gapController
+   - Does NOT require another HTTP request
+   - Prevent duplicate alerts for the same gap
+========================================================= */
+
+async function createSystemGapAlert({
+    organizationId,
+    stationId,
+    pumpId,
+    nozzleId,
+    shiftId,
+    gapId,
+    severity = "info",
+    title,
+    message
+}) {
+
+    console.log(
+        "FUELGAP - CREATE SYSTEM GAP ALERT"
+    );
+
+    if (!organizationId) {
+        throw new Error(
+            "Organization ID is required for system alert"
+        );
+    }
+
+    if (!gapId) {
+        throw new Error(
+            "Gap ID is required for system alert"
+        );
+    }
+
+    /* =====================================================
+       CHECK FOR EXISTING ALERT
+    ===================================================== */
+
+    const {
+        data: existingAlert,
+        error: existingAlertError
+    } = await supabaseAdmin
+        .from("alerts")
+        .select("id")
+        .eq(
+            "organization_id",
+            organizationId
+        )
+        .eq(
+            "gap_id",
+            gapId
+        )
+        .limit(1)
+        .maybeSingle();
+
+    if (existingAlertError) {
+
+        console.error(
+            "SYSTEM GAP ALERT DUPLICATE CHECK ERROR:",
+            existingAlertError
+        );
+
+        throw existingAlertError;
+    }
+
+    /* =====================================================
+       DO NOT CREATE DUPLICATE ALERT
+    ===================================================== */
+
+    if (existingAlert) {
+
+        console.log(
+            "FUELGAP - SYSTEM GAP ALERT ALREADY EXISTS:",
+            existingAlert.id
+        );
+
+        return existingAlert;
+    }
+
+    /* =====================================================
+       CREATE ALERT
+    ===================================================== */
+
+    const {
+        data: alert,
+        error: alertError
+    } = await supabaseAdmin
+        .from("alerts")
+        .insert({
+
+            organization_id:
+                organizationId,
+
+            station_id:
+                stationId || null,
+
+            pump_id:
+                pumpId || null,
+
+            nozzle_id:
+                nozzleId || null,
+
+            shift_id:
+                shiftId || null,
+
+            gap_id:
+                gapId,
+
+            type:
+                "gap_variance",
+
+            severity:
+                severity || "info",
+
+            title:
+                title ||
+                "Meter Gap Recorded",
+
+            message:
+                message ||
+                "A meter gap has been calculated.",
+
+            status:
+                "new"
+
+        })
+        .select("*")
+        .single();
+
+    if (alertError) {
+
+        console.error(
+            "FUELGAP - CREATE SYSTEM GAP ALERT ERROR:",
+            alertError
+        );
+
+        throw alertError;
+    }
+
+    console.log(
+        "FUELGAP - SYSTEM GAP ALERT CREATED:",
+        alert.id
+    );
+
+    return alert;
+}
+
 
 /* =========================================================
    EXPORTS
@@ -2001,6 +2111,7 @@ module.exports = {
 
     resolveAlert,
 
-    deleteAlert
+    deleteAlert,
+     createSystemGapAlert
 
 };

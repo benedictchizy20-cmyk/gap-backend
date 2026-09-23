@@ -31,6 +31,7 @@ const {
 } = require("./alertController");
 
 
+
 /* =========================================================
    HELPERS
 ========================================================= */
@@ -1101,47 +1102,20 @@ async function getGaps(
         }
 
 
-        let query =
-            supabaseAdmin
-                .from("gaps")
-                .select(`
-                    *,
-                    stations (
-                        id,
-                        name,
-                        address,
-                        city,
-                        state
-                    ),
-                    pumps (
-                        id,
-                        pump_number,
-                        brand,
-                        model
-                    ),
-                    nozzles (
-                        id,
-                        nozzle_number,
-                        product,
-                        price_per_litre
-                    ),
-                    shifts (
-                        id,
-                        shift_name,
-                        shift_date,
-                        status
-                    )
-                `)
-                .eq(
-                    "organization_id",
-                    appUser.organization_id
-                )
-                .order(
-                    "created_at",
-                    {
-                        ascending: false
-                    }
-                );
+            let query =
+    supabaseAdmin
+        .from("gaps")
+        .select("*")
+        .eq(
+            "organization_id",
+            appUser.organization_id
+        )
+        .order(
+            "created_at",
+            {
+                ascending: false
+            }
+        );
 
 
         const role =
@@ -1302,48 +1276,22 @@ async function getGapById(
         }
 
 
-        const {
-            data: gap,
-            error
-        } = await supabaseAdmin
-            .from("gaps")
-            .select(`
-                *,
-                stations (
-                    id,
-                    name,
-                    address,
-                    city,
-                    state
-                ),
-                pumps (
-                    id,
-                    pump_number,
-                    brand,
-                    model
-                ),
-                nozzles (
-                    id,
-                    nozzle_number,
-                    product,
-                    price_per_litre
-                ),
-                shifts (
-                    id,
-                    shift_name,
-                    shift_date,
-                    status
-                )
-            `)
-            .eq(
-                "id",
-                id
-            )
-            .eq(
-                "organization_id",
-                appUser.organization_id
-            )
-            .maybeSingle();
+       
+            const {
+    data: gap,
+    error
+} = await supabaseAdmin
+    .from("gaps")
+    .select("*")
+    .eq(
+        "id",
+        id
+    )
+    .eq(
+        "organization_id",
+        appUser.organization_id
+    )
+    .maybeSingle();
 
 
         if (error) {
