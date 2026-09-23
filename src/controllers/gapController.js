@@ -110,57 +110,132 @@ async function getApplicationUser(authUserId) {
    VERIFY STATION ACCESS
 ========================================================= */
 
+/* =========================================================
+   VERIFY STATION ACCESS
+========================================================= */
+
 async function verifyStationAccess(
     stationId,
     organizationId
 ) {
+    try {
 
-    if (!stationId) {
-        throw new Error(
-            "Station ID is required"
+        console.log(
+            "VERIFY STATION ACCESS"
         );
-    }
 
-    if (!organizationId) {
-        throw new Error(
-            "Organization ID is required"
+        console.log(
+            "STATION ID:",
+            stationId
         );
-    }
 
-    const {
-        data: station,
-        error
-    } = await supabaseAdmin
-        .from("stations")
-        .select(`
-            id,
-            organization_id,
-            name,
-            status
-        `)
-        .eq("id", stationId)
-        .eq("organization_id", organizationId)
-        .maybeSingle();
+        console.log(
+            "ORGANIZATION ID:",
+            organizationId
+        );
 
-    if (error) {
+
+        if (!stationId) {
+            throw new Error(
+                "Station ID is required"
+            );
+        }
+
+        if (!organizationId) {
+            throw new Error(
+                "Organization ID is required"
+            );
+        }
+
+
+        const {
+            data: station,
+            error: stationError
+        } = await supabaseAdmin
+            .from("stations")
+            .select(`
+                id,
+                organization_id,
+                name,
+                status
+            `)
+            .eq(
+                "id",
+                stationId
+            )
+            .maybeSingle();
+
+
+        if (stationError) {
+
+            console.error(
+                "VERIFY STATION DATABASE ERROR:",
+                stationError
+            );
+
+            throw new Error(
+                `Unable to verify station access: ${stationError.message}`
+            );
+        }
+
+
+        if (!station) {
+
+            throw new Error(
+                "Station not found"
+            );
+        }
+
+
+        console.log(
+            "STATION FOUND:",
+            station
+        );
+
+
+        /* =================================================
+           ORGANIZATION ACCESS CHECK
+        ================================================= */
+
+        if (
+            String(
+                station.organization_id
+            ) !== String(
+                organizationId
+            )
+        ) {
+
+            console.error(
+                "STATION ORGANIZATION MISMATCH"
+            );
+
+            console.error(
+                "STATION ORGANIZATION:",
+                station.organization_id
+            );
+
+            console.error(
+                "USER ORGANIZATION:",
+                organizationId
+            );
+
+            throw new Error(
+                "Station does not belong to your organization"
+            );
+        }
+
+
+        return station;
+
+    } catch (error) {
 
         console.error(
             "VERIFY STATION ACCESS ERROR:",
             error
         );
 
-        throw new Error(
-            "Unable to verify station access"
-        );
+        throw error;
     }
-
-    if (!station) {
-        throw new Error(
-            "Station does not belong to your organization"
-        );
-    }
-
-    return station;
 }
 
 
