@@ -156,8 +156,7 @@ async function verifyStationAccess(
             .select(`
                 id,
                 organization_id,
-                name,
-                status
+                name
             `)
             .eq(
                 "id",
@@ -225,6 +224,11 @@ async function verifyStationAccess(
         }
 
 
+        console.log(
+            "STATION ACCESS VERIFIED"
+        );
+
+
         return station;
 
     } catch (error) {
@@ -237,6 +241,9 @@ async function verifyStationAccess(
         throw error;
     }
 }
+  
+
+
 
 
 /* =========================================================
