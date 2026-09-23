@@ -2005,17 +2005,19 @@ const backfillMeterGap = async (req, res) => {
             });
         }
 
-        /*
-         * Only management users can backfill gaps.
-         */
-        const role = normalizeRole(appUser.role);
+            /*
+ * Only management users can backfill gaps.
+ */
+const role = String(appUser.role || "")
+    .trim()
+    .toLowerCase();
 
-        if (!isOrganizationWideRole(role)) {
-            return res.status(403).json({
-                success: false,
-                message: "You do not have permission to backfill meter gaps"
-            });
-        }
+if (!["owner", "admin", "super_admin"].includes(role)) {
+    return res.status(403).json({
+        success: false,
+        message: "You do not have permission to backfill meter gaps"
+    });
+}
 
         const { reading_id } = req.params;
 
