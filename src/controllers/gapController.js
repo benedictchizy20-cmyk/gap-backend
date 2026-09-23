@@ -31,7 +31,6 @@ const {
 } = require("./alertController");
 
 
-
 /* =========================================================
    HELPERS
 ========================================================= */
@@ -91,7 +90,6 @@ async function getApplicationUser(
     if (!authUserId) {
         return null;
     }
-
 
     const {
         data,
@@ -163,11 +161,18 @@ async function verifyStationAccess(
 
 
     if (error) {
+
+        console.error(
+            "GAP VERIFY STATION ERROR:",
+            error
+        );
+
         throw error;
     }
 
 
     if (!station) {
+
         throw new Error(
             "Station was not found in this organization."
         );
@@ -242,6 +247,12 @@ async function findOpeningForClosing({
 
 
     if (error) {
+
+        console.error(
+            "GAP FIND OPENING ERROR:",
+            error
+        );
+
         throw error;
     }
 
@@ -314,6 +325,12 @@ async function findClosingForOpening({
 
 
     if (error) {
+
+        console.error(
+            "GAP FIND CLOSING ERROR:",
+            error
+        );
+
         throw error;
     }
 
@@ -327,6 +344,7 @@ async function findClosingForOpening({
 ========================================================= */
 
 async function findExistingGap({
+    organizationId,
     stationId,
     pumpId,
     nozzleId,
@@ -336,9 +354,18 @@ async function findExistingGap({
 }) {
 
     /*
-     * We use the reading values + same station/pump/nozzle/shift
-     * because older FuelGap databases may not yet contain
-     * opening_reading_id / closing_reading_id columns.
+     * We compare:
+     *
+     * organization
+     * station
+     * pump
+     * nozzle
+     * shift
+     * opening meter
+     * closing meter
+     *
+     * This prevents the same opening/closing pair
+     * from creating duplicate gap records.
      */
 
     const {
@@ -346,7 +373,13 @@ async function findExistingGap({
         error
     } = await supabaseAdmin
         .from("gaps")
-        .select("*")
+        .select(`
+            *
+        `)
+        .eq(
+            "organization_id",
+            organizationId
+        )
         .eq(
             "station_id",
             stationId
@@ -373,6 +406,12 @@ async function findExistingGap({
 
 
     if (error) {
+
+        console.error(
+            "FUELGAP - FIND EXISTING GAP ERROR:",
+            error
+        );
+
         throw error;
     }
 
@@ -382,17 +421,31 @@ async function findExistingGap({
 
 
     return records.find(
-        gap =>
-            Number(
-                gap.opening_reading
-            ) === Number(
-                openingReading
-            ) &&
-            Number(
-                gap.closing_reading
-            ) === Number(
-                closingReading
-            )
+        gap => {
+
+            const existingOpening =
+                Number(
+                    gap.opening_reading
+                );
+
+            const existingClosing =
+                Number(
+                    gap.closing_reading
+                );
+
+            return (
+                Number.isFinite(
+                    existingOpening
+                ) &&
+                Number.isFinite(
+                    existingClosing
+                ) &&
+                existingOpening ===
+                    Number(openingReading) &&
+                existingClosing ===
+                    Number(closingReading)
+            );
+        }
     ) || null;
 }
 
@@ -405,13 +458,34 @@ function determineGapStatus(
     meterGap
 ) {
 
+    /*
+     * A negative movement means the closing meter
+     * is lower than the opening meter.
+     *
+     * This is treated as a variance.
+     */
+
     if (meterGap < 0) {
+
         return "variance";
     }
 
+
+    /*
+     * Zero movement is normal.
+     */
+
     if (meterGap === 0) {
+
         return "normal";
     }
+
+
+    /*
+     * Positive meter movement is also stored
+     * as normal because it represents normal
+     * cumulative meter progression.
+     */
 
     return "normal";
 }
@@ -431,17 +505,19 @@ function determineAlertSeverity(
      */
 
     if (meterGap < 0) {
+
         return "critical";
     }
 
 
     /*
      * Positive movement is still recorded as an alert
-     * because the user requested every calculated gap
-     * to be sent to Alerts.
+     * because every calculated gap must appear
+     * on the Alerts page.
      */
 
     if (meterGap > 0) {
+
         return "warning";
     }
 
@@ -471,6 +547,10 @@ function buildGapAlert({
         ).toFixed(2);
 
 
+    /* =====================================================
+       NEGATIVE MOVEMENT
+    ===================================================== */
+
     if (meterGap < 0) {
 
         return {
@@ -485,6 +565,10 @@ function buildGapAlert({
     }
 
 
+    /* =====================================================
+       ZERO MOVEMENT
+    ===================================================== */
+
     if (meterGap === 0) {
 
         return {
@@ -498,6 +582,10 @@ function buildGapAlert({
         };
     }
 
+
+    /* =====================================================
+       POSITIVE MOVEMENT
+    ===================================================== */
 
     return {
 
@@ -538,7 +626,12 @@ async function processMeterGap({
     );
 
 
+    /* =====================================================
+       VALIDATE REQUIRED IDS
+    ===================================================== */
+
     if (!organizationId) {
+
         throw new Error(
             "Organization ID is required."
         );
@@ -546,6 +639,7 @@ async function processMeterGap({
 
 
     if (!stationId) {
+
         throw new Error(
             "Station ID is required."
         );
@@ -553,6 +647,7 @@ async function processMeterGap({
 
 
     if (!pumpId) {
+
         throw new Error(
             "Pump ID is required."
         );
@@ -560,6 +655,7 @@ async function processMeterGap({
 
 
     if (!nozzleId) {
+
         throw new Error(
             "Nozzle ID is required."
         );
@@ -567,18 +663,65 @@ async function processMeterGap({
 
 
     if (!shiftId) {
+
         throw new Error(
             "Shift ID is required."
         );
     }
 
 
-    if (!reading) {
+    if (
+        reading === undefined ||
+        reading === null
+    ) {
+
         throw new Error(
             "Meter reading is required."
         );
     }
 
+
+    /* =====================================================
+       NORMALIZE READING OBJECT
+    ===================================================== */
+
+    /*
+     * Normally the meter controller passes an object:
+     *
+     * {
+     *     id,
+     *     reading,
+     *     captured_at,
+     *     ...
+     * }
+     *
+     * We also allow a raw number/string so that the
+     * function remains backwards compatible.
+     */
+
+    let normalizedReading =
+        reading;
+
+
+    if (
+        typeof reading !== "object"
+    ) {
+
+        normalizedReading = {
+
+            reading:
+                reading,
+
+            captured_at:
+                new Date().toISOString()
+
+        };
+    }
+
+
+    /* =====================================================
+       NORMALIZE READING TYPE
+    ===================================================== */
 
     const normalizedReadingType =
         normalizeRole(
@@ -614,6 +757,62 @@ async function processMeterGap({
 
 
     /* =====================================================
+       VALIDATE CURRENT READING VALUE
+    ===================================================== */
+
+    const currentReadingValue =
+        Number(
+            normalizedReading.reading
+        );
+
+
+    if (
+        !Number.isFinite(
+            currentReadingValue
+        )
+    ) {
+
+        throw new Error(
+            "Meter reading must be a valid number."
+        );
+    }
+
+
+    /* =====================================================
+       VALIDATE CAPTURED TIME
+    ===================================================== */
+
+    const capturedAt =
+        normalizedReading.captured_at;
+
+
+    if (!capturedAt) {
+
+        throw new Error(
+            "Meter reading captured_at is required for gap calculation."
+        );
+    }
+
+
+    const capturedTimestamp =
+        new Date(
+            capturedAt
+        ).getTime();
+
+
+    if (
+        !Number.isFinite(
+            capturedTimestamp
+        )
+    ) {
+
+        throw new Error(
+            "Meter reading captured_at is not a valid date."
+        );
+    }
+
+
+    /* =====================================================
        VERIFY STATION
     ===================================================== */
 
@@ -624,14 +823,26 @@ async function processMeterGap({
         );
 
 
+    console.log(
+        "FUELGAP - STATION VERIFIED:",
+        station.name
+    );
+
+
     /* =====================================================
-       FIND PAIR
+       FIND MATCHING OPENING / CLOSING
     ===================================================== */
 
-    let openingReading = null;
+    let openingReading =
+        null;
 
-    let closingReading = null;
+    let closingReading =
+        null;
 
+
+    /* =====================================================
+       CURRENT READING IS CLOSING
+    ===================================================== */
 
     if (
         normalizedReadingType ===
@@ -639,7 +850,12 @@ async function processMeterGap({
     ) {
 
         closingReading =
-            reading;
+            normalizedReading;
+
+
+        console.log(
+            "FUELGAP - FINDING OPENING READING"
+        );
 
 
         openingReading =
@@ -654,15 +870,35 @@ async function processMeterGap({
                 shiftId,
 
                 closingCapturedAt:
-                    reading.captured_at
+                    capturedAt
 
             });
 
 
-    } else {
+        if (openingReading) {
+
+            console.log(
+                "FUELGAP - MATCHING OPENING:",
+                openingReading.id
+            );
+        }
+
+    }
+
+
+    /* =====================================================
+       CURRENT READING IS OPENING
+    ===================================================== */
+
+    else {
 
         openingReading =
-            reading;
+            normalizedReading;
+
+
+        console.log(
+            "FUELGAP - FINDING CLOSING READING"
+        );
 
 
         closingReading =
@@ -677,9 +913,18 @@ async function processMeterGap({
                 shiftId,
 
                 openingCapturedAt:
-                    reading.captured_at
+                    capturedAt
 
             });
+
+
+        if (closingReading) {
+
+            console.log(
+                "FUELGAP - MATCHING CLOSING:",
+                closingReading.id
+            );
+        }
     }
 
 
@@ -719,7 +964,7 @@ async function processMeterGap({
 
 
     /* =====================================================
-       VALIDATE ORDER
+       VALIDATE OPENING/CLOSING TIMESTAMPS
     ===================================================== */
 
     const openingTime =
@@ -735,6 +980,21 @@ async function processMeterGap({
 
 
     if (
+        !Number.isFinite(
+            openingTime
+        ) ||
+        !Number.isFinite(
+            closingTime
+        )
+    ) {
+
+        throw new Error(
+            "Opening or closing reading has an invalid captured_at date."
+        );
+    }
+
+
+    if (
         closingTime <
         openingTime
     ) {
@@ -746,7 +1006,7 @@ async function processMeterGap({
 
 
     /* =====================================================
-       CALCULATE METER GAP
+       CALCULATE METER VALUES
     ===================================================== */
 
     const openingValue =
@@ -776,6 +1036,13 @@ async function processMeterGap({
     }
 
 
+    /* =====================================================
+       CORE GAP FORMULA
+    =====================================================
+
+       CLOSING - OPENING = METER GAP
+    ===================================================== */
+
     const meterGap =
         Number(
             (
@@ -792,20 +1059,27 @@ async function processMeterGap({
 
 
     console.log(
-        "FUELGAP - METER GAP CALCULATION:",
-        {
-            opening:
-                openingValue,
+        "FUELGAP - METER GAP CALCULATION"
+    );
 
-            closing:
-                closingValue,
+    console.log(
+        "OPENING:",
+        openingValue
+    );
 
-            gap:
-                meterGap,
+    console.log(
+        "CLOSING:",
+        closingValue
+    );
 
-            status:
-                gapStatus
-        }
+    console.log(
+        "METER GAP:",
+        meterGap
+    );
+
+    console.log(
+        "STATUS:",
+        gapStatus
     );
 
 
@@ -815,6 +1089,8 @@ async function processMeterGap({
 
     const existingGap =
         await findExistingGap({
+
+            organizationId,
 
             stationId,
 
@@ -858,18 +1134,17 @@ async function processMeterGap({
 
     /* =====================================================
        SAVE GAP
-       =====================================================
+    =====================================================
 
-       The existing gaps table in FuelGap was designed
-       around sales reconciliation.
+       IMPORTANT:
 
-       To avoid breaking that existing database structure,
-       expected_sales and actual_sales are kept at 0.
+       opening_reading and closing_reading are saved
+       because duplicate detection uses them.
 
-       They are NOT used for the meter-gap calculation.
+       expected_sales and actual_sales remain 0
+       for compatibility with the existing gaps table.
 
-       gap_amount contains the calculated meter movement
-       so existing gap pages can continue reading it.
+       SALES ARE NOT USED.
     ===================================================== */
 
     const {
@@ -893,6 +1168,12 @@ async function processMeterGap({
 
             shift_id:
                 shiftId,
+
+            opening_reading:
+                openingValue,
+
+            closing_reading:
+                closingValue,
 
             expected_sales:
                 0,
@@ -957,10 +1238,16 @@ async function processMeterGap({
         });
 
 
-    let createdAlert = null;
+    let createdAlert =
+        null;
 
 
     try {
+
+        console.log(
+            "FUELGAP - CREATING AUTOMATIC GAP ALERT"
+        );
+
 
         createdAlert =
             await createSystemGapAlert({
@@ -994,12 +1281,15 @@ async function processMeterGap({
             createdAlert?.id
         );
 
-
     } catch (alertError) {
 
         /*
-         * Gap has already been saved.
-         * We do not delete the gap if alert creation fails.
+         * The gap has already been saved.
+         *
+         * We deliberately do not delete the gap if
+         * alert creation fails.
+         *
+         * This protects the meter-gap record.
          */
 
         console.error(
@@ -1061,18 +1351,29 @@ async function getGaps(
         );
 
 
+        /* =====================================================
+           AUTHENTICATION
+        ===================================================== */
+
         if (
             !req.user ||
             !req.user.id
         ) {
 
             return res.status(401).json({
+
                 success: false,
+
                 message:
                     "Authentication required"
+
             });
         }
 
+
+        /* =====================================================
+           APPLICATION USER
+        ===================================================== */
 
         const appUser =
             await getApplicationUser(
@@ -1083,40 +1384,74 @@ async function getGaps(
         if (!appUser) {
 
             return res.status(404).json({
+
                 success: false,
+
                 message:
                     "Application user profile not found"
+
             });
         }
 
+
+        /* =====================================================
+           ACTIVE ACCOUNT
+        ===================================================== */
 
         if (
             appUser.is_active === false
         ) {
 
             return res.status(403).json({
+
                 success: false,
+
                 message:
                     "Your account is inactive"
+
             });
         }
 
 
-            let query =
-    supabaseAdmin
-        .from("gaps")
-        .select("*")
-        .eq(
-            "organization_id",
-            appUser.organization_id
-        )
-        .order(
-            "created_at",
-            {
-                ascending: false
-            }
+        console.log(
+            "AUTHENTICATED USER:",
+            appUser.id
         );
 
+        console.log(
+            "ORGANIZATION ID:",
+            appUser.organization_id
+        );
+
+        console.log(
+            "USER ROLE:",
+            appUser.role
+        );
+
+
+        /* =====================================================
+           BASE QUERY
+        ===================================================== */
+
+        let query =
+            supabaseAdmin
+                .from("gaps")
+                .select("*")
+                .eq(
+                    "organization_id",
+                    appUser.organization_id
+                )
+                .order(
+                    "created_at",
+                    {
+                        ascending: false
+                    }
+                );
+
+
+        /* =====================================================
+           STATION RESTRICTION
+        ===================================================== */
 
         const role =
             normalizeRole(
@@ -1137,6 +1472,10 @@ async function getGaps(
         }
 
 
+        /* =====================================================
+           EXECUTE QUERY
+        ===================================================== */
+
         const {
             data: gaps,
             error
@@ -1151,11 +1490,15 @@ async function getGaps(
             );
 
             return res.status(500).json({
+
                 success: false,
+
                 message:
                     "Unable to load gaps",
+
                 error:
                     error.message
+
             });
         }
 
@@ -1163,6 +1506,36 @@ async function getGaps(
         const records =
             gaps || [];
 
+
+        console.log(
+            "GAPS FOUND:",
+            records.length
+        );
+
+
+        /* =====================================================
+           SUMMARY
+        ===================================================== */
+
+        const normalCount =
+            records.filter(
+                gap =>
+                    gap.status ===
+                    "normal"
+            ).length;
+
+
+        const varianceCount =
+            records.filter(
+                gap =>
+                    gap.status ===
+                    "variance"
+            ).length;
+
+
+        /* =====================================================
+           RESPONSE
+        ===================================================== */
 
         return res.status(200).json({
 
@@ -1180,18 +1553,10 @@ async function getGaps(
                     records.length,
 
                 normal:
-                    records.filter(
-                        gap =>
-                            gap.status ===
-                            "normal"
-                    ).length,
+                    normalCount,
 
                 variance:
-                    records.filter(
-                        gap =>
-                            gap.status ===
-                            "variance"
-                    ).length
+                    varianceCount
 
             }
 
@@ -1232,6 +1597,15 @@ async function getGapById(
 
     try {
 
+        console.log(
+            "FUELGAP - GET GAP BY ID"
+        );
+
+
+        /* =====================================================
+           GAP ID
+        ===================================================== */
+
         const {
             id
         } = req.params;
@@ -1240,12 +1614,19 @@ async function getGapById(
         if (!id) {
 
             return res.status(400).json({
+
                 success: false,
+
                 message:
                     "Gap ID is required"
+
             });
         }
 
+
+        /* =====================================================
+           AUTHENTICATION
+        ===================================================== */
 
         if (
             !req.user ||
@@ -1253,12 +1634,19 @@ async function getGapById(
         ) {
 
             return res.status(401).json({
+
                 success: false,
+
                 message:
                     "Authentication required"
+
             });
         }
 
+
+        /* =====================================================
+           APPLICATION USER
+        ===================================================== */
 
         const appUser =
             await getApplicationUser(
@@ -1269,52 +1657,98 @@ async function getGapById(
         if (!appUser) {
 
             return res.status(404).json({
+
                 success: false,
+
                 message:
                     "Application user profile not found"
+
             });
         }
 
 
-       
-            const {
-    data: gap,
-    error
-} = await supabaseAdmin
-    .from("gaps")
-    .select("*")
-    .eq(
-        "id",
-        id
-    )
-    .eq(
-        "organization_id",
-        appUser.organization_id
-    )
-    .maybeSingle();
+        /* =====================================================
+           ACTIVE ACCOUNT
+        ===================================================== */
+
+        if (
+            appUser.is_active === false
+        ) {
+
+            return res.status(403).json({
+
+                success: false,
+
+                message:
+                    "Your account is inactive"
+
+            });
+        }
+
+
+        /* =====================================================
+           FIND GAP
+           ORGANIZATION ISOLATION
+        ===================================================== */
+
+        const {
+            data: gap,
+            error
+        } = await supabaseAdmin
+            .from("gaps")
+            .select("*")
+            .eq(
+                "id",
+                id
+            )
+            .eq(
+                "organization_id",
+                appUser.organization_id
+            )
+            .maybeSingle();
 
 
         if (error) {
 
+            console.error(
+                "GET GAP BY ID ERROR:",
+                error
+            );
+
             return res.status(500).json({
+
                 success: false,
+
                 message:
                     "Unable to load gap",
+
                 error:
                     error.message
+
             });
         }
 
+
+        /* =====================================================
+           GAP NOT FOUND
+        ===================================================== */
 
         if (!gap) {
 
             return res.status(404).json({
+
                 success: false,
+
                 message:
                     "Gap not found"
+
             });
         }
 
+
+        /* =====================================================
+           STATION RESTRICTION
+        ===================================================== */
 
         const role =
             normalizeRole(
@@ -1334,12 +1768,19 @@ async function getGapById(
         ) {
 
             return res.status(403).json({
+
                 success: false,
+
                 message:
                     "You do not have access to this gap"
+
             });
         }
 
+
+        /* =====================================================
+           RESPONSE
+        ===================================================== */
 
         return res.status(200).json({
 
@@ -1385,18 +1826,34 @@ async function createGap(
 
     try {
 
+        console.log(
+            "FUELGAP - MANUAL GAP PROCESSING"
+        );
+
+
+        /* =====================================================
+           AUTHENTICATION
+        ===================================================== */
+
         if (
             !req.user ||
             !req.user.id
         ) {
 
             return res.status(401).json({
+
                 success: false,
+
                 message:
                     "Authentication required"
+
             });
         }
 
+
+        /* =====================================================
+           APPLICATION USER
+        ===================================================== */
 
         const appUser =
             await getApplicationUser(
@@ -1407,24 +1864,38 @@ async function createGap(
         if (!appUser) {
 
             return res.status(404).json({
+
                 success: false,
+
                 message:
                     "Application user profile not found"
+
             });
         }
 
+
+        /* =====================================================
+           ACTIVE ACCOUNT
+        ===================================================== */
 
         if (
             appUser.is_active === false
         ) {
 
             return res.status(403).json({
+
                 success: false,
+
                 message:
                     "Your account is inactive"
+
             });
         }
 
+
+        /* =====================================================
+           ROLE CHECK
+        ===================================================== */
 
         const role =
             normalizeRole(
@@ -1437,12 +1908,19 @@ async function createGap(
         ) {
 
             return res.status(403).json({
+
                 success: false,
+
                 message:
                     "Only management users can manually process gaps"
+
             });
         }
 
+
+        /* =====================================================
+           REQUEST BODY
+        ===================================================== */
 
         const {
 
@@ -1465,12 +1943,41 @@ async function createGap(
         ) {
 
             return res.status(400).json({
+
                 success: false,
+
                 message:
                     "Station, pump, nozzle and shift are required"
+
             });
         }
 
+
+        /* =====================================================
+           GET LATEST CLOSING READING
+        ===================================================== */
+
+        const latestClosingReading =
+            await getLatestClosingReading({
+
+                stationId:
+                    station_id,
+
+                pumpId:
+                    pump_id,
+
+                nozzleId:
+                    nozzle_id,
+
+                shiftId:
+                    shift_id
+
+            });
+
+
+        /* =====================================================
+           PROCESS GAP
+        ===================================================== */
 
         const result =
             await processMeterGap({
@@ -1494,24 +2001,14 @@ async function createGap(
                     "closing",
 
                 reading:
-                    await getLatestClosingReading({
-
-                        stationId:
-                            station_id,
-
-                        pumpId:
-                            pump_id,
-
-                        nozzleId:
-                            nozzle_id,
-
-                        shiftId:
-                            shift_id
-
-                    })
+                    latestClosingReading
 
             });
 
+
+        /* =====================================================
+           RESPONSE
+        ===================================================== */
 
         return res.status(
             result.processed
@@ -1613,6 +2110,12 @@ async function getLatestClosingReading({
 
 
     if (error) {
+
+        console.error(
+            "FUELGAP - GET LATEST CLOSING ERROR:",
+            error
+        );
+
         throw error;
     }
 
@@ -1656,9 +2159,12 @@ async function deleteGap(
         ) {
 
             return res.status(401).json({
+
                 success: false,
+
                 message:
                     "Authentication required"
+
             });
         }
 
@@ -1675,9 +2181,12 @@ async function deleteGap(
         if (!id) {
 
             return res.status(400).json({
+
                 success: false,
+
                 message:
                     "Gap ID is required"
+
             });
         }
 
@@ -1695,9 +2204,12 @@ async function deleteGap(
         if (!appUser) {
 
             return res.status(404).json({
+
                 success: false,
+
                 message:
                     "Application user profile not found"
+
             });
         }
 
@@ -1711,9 +2223,12 @@ async function deleteGap(
         ) {
 
             return res.status(403).json({
+
                 success: false,
+
                 message:
                     "Your account is inactive"
+
             });
         }
 
@@ -1733,9 +2248,12 @@ async function deleteGap(
         ) {
 
             return res.status(403).json({
+
                 success: false,
+
                 message:
                     "Only management users can delete gaps"
+
             });
         }
 
@@ -1757,6 +2275,8 @@ async function deleteGap(
                 pump_id,
                 nozzle_id,
                 shift_id,
+                opening_reading,
+                closing_reading,
                 gap_amount,
                 status
             `)
@@ -1779,11 +2299,15 @@ async function deleteGap(
             );
 
             return res.status(500).json({
+
                 success: false,
+
                 message:
                     "Unable to find gap",
+
                 error:
                     findError.message
+
             });
         }
 
@@ -1791,9 +2315,12 @@ async function deleteGap(
         if (!gap) {
 
             return res.status(404).json({
+
                 success: false,
+
                 message:
                     "Gap not found"
+
             });
         }
 
@@ -1825,11 +2352,15 @@ async function deleteGap(
             );
 
             return res.status(500).json({
+
                 success: false,
+
                 message:
                     "Unable to delete gap",
+
                 error:
                     deleteError.message
+
             });
         }
 
@@ -1852,7 +2383,10 @@ async function deleteGap(
                 "Gap deleted successfully",
 
             data: {
-                id: gap.id
+
+                id:
+                    gap.id
+
             }
 
         });
@@ -1879,6 +2413,7 @@ async function deleteGap(
     }
 }
 
+
 /* =========================================================
    EXPORTS
 ========================================================= */
@@ -1892,6 +2427,7 @@ module.exports = {
     createGap,
 
     processMeterGap,
-     deleteGap
+
+    deleteGap
 
 };
