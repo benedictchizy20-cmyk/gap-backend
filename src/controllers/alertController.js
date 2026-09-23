@@ -559,27 +559,290 @@ async function createAlert(req, res) {
    - creates the alert inside the correct organization
 ========================================================= */
 
+      /* =========================================================
+   CREATE SYSTEM GAP ALERT
+========================================================
+   This function is used automatically by gapController.js.
+
+   It:
+   - accepts camelCase and snake_case field names
+   - validates required information
+   - prevents duplicate alerts for the same gap
+   - creates the alert inside the correct organization
+========================================================= */
+
 async function createSystemGapAlert({
 
+    /* -----------------------------------------------------
+       SUPPORT BOTH FORMATS
+    ----------------------------------------------------- */
+
     organizationId,
+    organization_id,
 
     stationId,
+    station_id,
 
     pumpId,
+    pump_id,
 
     nozzleId,
+    nozzle_id,
 
     shiftId,
+    shift_id,
 
     gapId,
+    gap_id,
 
     severity,
-
     title,
-
     message
 
 }) {
+
+    console.log("==========================================");
+    console.log("FUELGAP - CREATE SYSTEM GAP ALERT");
+    console.log("==========================================");
+
+
+    /* -----------------------------------------------------
+       NORMALIZE VALUES
+    ----------------------------------------------------- */
+
+    const finalOrganizationId =
+        organizationId ||
+        organization_id ||
+        null;
+
+    const finalStationId =
+        stationId ||
+        station_id ||
+        null;
+
+    const finalPumpId =
+        pumpId ||
+        pump_id ||
+        null;
+
+    const finalNozzleId =
+        nozzleId ||
+        nozzle_id ||
+        null;
+
+    const finalShiftId =
+        shiftId ||
+        shift_id ||
+        null;
+
+    const finalGapId =
+        gapId ||
+        gap_id ||
+        null;
+
+
+    /* -----------------------------------------------------
+       LOG VALUES
+    ----------------------------------------------------- */
+
+    console.log(
+        "SYSTEM GAP ALERT ORGANIZATION ID:",
+        finalOrganizationId
+    );
+
+    console.log(
+        "SYSTEM GAP ALERT STATION ID:",
+        finalStationId
+    );
+
+    console.log(
+        "SYSTEM GAP ALERT PUMP ID:",
+        finalPumpId
+    );
+
+    console.log(
+        "SYSTEM GAP ALERT NOZZLE ID:",
+        finalNozzleId
+    );
+
+    console.log(
+        "SYSTEM GAP ALERT SHIFT ID:",
+        finalShiftId
+    );
+
+    console.log(
+        "SYSTEM GAP ALERT GAP ID:",
+        finalGapId
+    );
+
+
+    /* -----------------------------------------------------
+       REQUIRED DATA
+    ----------------------------------------------------- */
+
+    if (!finalOrganizationId) {
+
+        throw new Error(
+            "Organization ID is required for gap alert"
+        );
+    }
+
+
+    if (!finalGapId) {
+
+        throw new Error(
+            "Gap ID is required for gap alert"
+        );
+    }
+
+
+    if (!title) {
+
+        throw new Error(
+            "Gap alert title is required"
+        );
+    }
+
+
+    if (!message) {
+
+        throw new Error(
+            "Gap alert message is required"
+        );
+    }
+
+
+    /* -----------------------------------------------------
+       VALID SEVERITIES
+    ----------------------------------------------------- */
+
+    const allowedSeverities = [
+        "info",
+        "warning",
+        "high",
+        "critical"
+    ];
+
+
+    const finalSeverity =
+        allowedSeverities.includes(
+            severity
+        )
+            ? severity
+            : "info";
+
+
+    /* -----------------------------------------------------
+       CHECK FOR EXISTING ALERT
+       Prevent duplicate alert for same gap
+    ----------------------------------------------------- */
+
+    const {
+        data: existingAlert,
+        error: existingAlertError
+    } = await supabaseAdmin
+        .from("alerts")
+        .select("id")
+        .eq(
+            "organization_id",
+            finalOrganizationId
+        )
+        .eq(
+            "gap_id",
+            finalGapId
+        )
+        .limit(1)
+        .maybeSingle();
+
+
+    if (existingAlertError) {
+
+        console.error(
+            "CHECK EXISTING GAP ALERT ERROR:",
+            existingAlertError
+        );
+
+        throw existingAlertError;
+    }
+
+
+    if (existingAlert) {
+
+        console.log(
+            "GAP ALERT ALREADY EXISTS:",
+            existingAlert.id
+        );
+
+        return existingAlert;
+    }
+
+
+    /* -----------------------------------------------------
+       CREATE ALERT
+    ----------------------------------------------------- */
+
+    const {
+        data,
+        error
+    } = await supabaseAdmin
+        .from("alerts")
+        .insert({
+
+            organization_id:
+                finalOrganizationId,
+
+            station_id:
+                finalStationId,
+
+            pump_id:
+                finalPumpId,
+
+            nozzle_id:
+                finalNozzleId,
+
+            shift_id:
+                finalShiftId,
+
+            gap_id:
+                finalGapId,
+
+            type:
+                "gap_variance",
+
+            severity:
+                finalSeverity,
+
+            title,
+
+            message,
+
+            status:
+                "new"
+
+        })
+        .select()
+        .single();
+
+
+    if (error) {
+
+        console.error(
+            "CREATE SYSTEM GAP ALERT DATABASE ERROR:",
+            error
+        );
+
+        throw error;
+    }
+
+
+    console.log(
+        "SYSTEM GAP ALERT CREATED:",
+        data.id
+    );
+
+
+    return data;
+}
 
     console.log("==========================================");
     console.log("FUELGAP - CREATE SYSTEM GAP ALERT");
