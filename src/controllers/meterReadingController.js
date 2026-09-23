@@ -1970,9 +1970,10 @@ const deleteMeterReading = async (
     }
 };
 
+
 /* =========================================================
    BACKFILL EXISTING METER READING GAP
-   ========================================================= */
+========================================================= */
 
 const backfillMeterGap = async (req, res) => {
     try {
@@ -2005,20 +2006,24 @@ const backfillMeterGap = async (req, res) => {
             });
         }
 
-            /*
- * Only management users can backfill gaps.
- */
-const role = String(appUser.role || "")
-    .trim()
-    .toLowerCase();
+        /*
+         * Only management users can backfill gaps.
+         */
+        const role = String(appUser.role || "")
+            .trim()
+            .toLowerCase();
 
-if (!["owner", "admin", "super_admin"].includes(role)) {
-    return res.status(403).json({
-        success: false,
-        message: "You do not have permission to backfill meter gaps"
-    });
-}
+        if (!["owner", "admin", "super_admin"].includes(role)) {
+            return res.status(403).json({
+                success: false,
+                message: "You do not have permission to backfill meter gaps"
+            });
+        }
 
+        /*
+         * Get reading ID from:
+         * /:id/backfill-gap
+         */
         const { id: reading_id } = req.params;
 
         if (!reading_id) {
@@ -2030,13 +2035,15 @@ if (!["owner", "admin", "super_admin"].includes(role)) {
 
         /*
          * Get the existing closing reading.
+         *
+         * IMPORTANT:
+         * meter_readings DOES NOT have organization_id.
          */
         const { data: closingReading, error: closingError } =
             await supabaseAdmin
                 .from("meter_readings")
                 .select(`
                     id,
-                    organization_id,
                     station_id,
                     pump_id,
                     nozzle_id,
@@ -2080,13 +2087,34 @@ if (!["owner", "admin", "super_admin"].includes(role)) {
         }
 
         /*
-         * Make sure the reading belongs to the
+         * Verify that the station belongs to the
          * authenticated user's organization.
          */
-        if (
-            closingReading.organization_id !==
-            appUser.organization_id
-        ) {
+        const { data: station, error: stationError } =
+            await supabaseAdmin
+                .from("stations")
+                .select(`
+                    id,
+                    organization_id
+                `)
+                .eq("id", closingReading.station_id)
+                .eq("organization_id", appUser.organization_id)
+                .maybeSingle();
+
+        if (stationError) {
+            console.error(
+                "BACKFILL STATION CHECK ERROR:",
+                stationError
+            );
+
+            return res.status(500).json({
+                success: false,
+                message: "Failed to verify station",
+                error: stationError.message
+            });
+        }
+
+        if (!station) {
             return res.status(403).json({
                 success: false,
                 message: "You cannot process a reading from another organization"
@@ -2143,6 +2171,17 @@ if (!["owner", "admin", "super_admin"].includes(role)) {
         });
     }
 };
+
+
+       
+        
+        
+       
+         
+        
+        
+               
+        
 
 
 /* =========================================================
