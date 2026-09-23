@@ -2019,7 +2019,7 @@ if (!["owner", "admin", "super_admin"].includes(role)) {
     });
 }
 
-        const { reading_id } = req.params;
+        const { id: reading_id } = req.params;
 
         if (!reading_id) {
             return res.status(400).json({
