@@ -12,7 +12,8 @@
    - Keep all alert operations organization-scoped
 ========================================================= */
 
-const supabaseAdmin = require("../config/supabaseAdmin");
+const supabaseAdmin =
+    require("../config/supabaseAdmin");
 
 
 /* =========================================================
@@ -22,10 +23,15 @@ const supabaseAdmin = require("../config/supabaseAdmin");
 async function getApplicationUser(authUserId) {
 
     if (!authUserId) {
-        throw new Error("Authenticated user ID is required");
+        throw new Error(
+            "Authenticated user ID is required"
+        );
     }
 
-    const { data, error } = await supabaseAdmin
+    const {
+        data,
+        error
+    } = await supabaseAdmin
         .from("users")
         .select(`
             id,
@@ -38,10 +44,14 @@ async function getApplicationUser(authUserId) {
             role,
             is_active
         `)
-        .eq("auth_user_id", authUserId)
+        .eq(
+            "auth_user_id",
+            authUserId
+        )
         .maybeSingle();
 
     if (error) {
+
         console.error(
             "GET APPLICATION USER ERROR:",
             error
@@ -51,7 +61,10 @@ async function getApplicationUser(authUserId) {
     }
 
     if (!data) {
-        throw new Error("Application user profile not found");
+
+        throw new Error(
+            "Application user profile not found"
+        );
     }
 
     return data;
@@ -71,10 +84,15 @@ async function getAuthenticatedApplicationUser(req) {
         req.authUser?.auth_user_id;
 
     if (!authUserId) {
-        throw new Error("Authenticated user not found");
+
+        throw new Error(
+            "Authenticated user not found"
+        );
     }
 
-    return await getApplicationUser(authUserId);
+    return await getApplicationUser(
+        authUserId
+    );
 }
 
 
@@ -82,7 +100,10 @@ async function getAuthenticatedApplicationUser(req) {
    HELPER - GET ORGANIZATION ID
 ========================================================= */
 
-function getOrganizationId(req, applicationUser) {
+function getOrganizationId(
+    req,
+    applicationUser
+) {
 
     return (
         applicationUser?.organization_id ||
@@ -114,14 +135,24 @@ function hasManagementRole(role) {
 
 async function getAlerts(req, res) {
 
-    console.log("==========================================");
-    console.log("FUELGAP - GET ALERTS");
-    console.log("==========================================");
+    console.log(
+        "=========================================="
+    );
+
+    console.log(
+        "FUELGAP - GET ALERTS"
+    );
+
+    console.log(
+        "=========================================="
+    );
 
     try {
 
         const applicationUser =
-            await getAuthenticatedApplicationUser(req);
+            await getAuthenticatedApplicationUser(
+                req
+            );
 
         const organizationId =
             getOrganizationId(
@@ -132,8 +163,12 @@ async function getAlerts(req, res) {
         if (!organizationId) {
 
             return res.status(400).json({
+
                 success: false,
-                message: "Organization ID not found"
+
+                message:
+                    "Organization ID not found"
+
             });
         }
 
@@ -217,9 +252,15 @@ async function getAlerts(req, res) {
             );
 
             return res.status(500).json({
+
                 success: false,
-                message: "Failed to load alerts",
-                error: error.message
+
+                message:
+                    "Failed to load alerts",
+
+                error:
+                    error.message
+
             });
         }
 
@@ -234,9 +275,11 @@ async function getAlerts(req, res) {
 
             success: true,
 
-            data: data || [],
+            data:
+                data || [],
 
-            count: data?.length || 0
+            count:
+                data?.length || 0
 
         });
 
@@ -266,14 +309,24 @@ async function getAlerts(req, res) {
 
 async function getAlertById(req, res) {
 
-    console.log("==========================================");
-    console.log("FUELGAP - GET ALERT BY ID");
-    console.log("==========================================");
+    console.log(
+        "=========================================="
+    );
+
+    console.log(
+        "FUELGAP - GET ALERT BY ID"
+    );
+
+    console.log(
+        "=========================================="
+    );
 
     try {
 
         const applicationUser =
-            await getAuthenticatedApplicationUser(req);
+            await getAuthenticatedApplicationUser(
+                req
+            );
 
         const organizationId =
             getOrganizationId(
@@ -284,8 +337,12 @@ async function getAlertById(req, res) {
         if (!organizationId) {
 
             return res.status(400).json({
+
                 success: false,
-                message: "Organization ID not found"
+
+                message:
+                    "Organization ID not found"
+
             });
         }
 
@@ -297,8 +354,12 @@ async function getAlertById(req, res) {
         if (!alertId) {
 
             return res.status(400).json({
+
                 success: false,
-                message: "Alert ID is required"
+
+                message:
+                    "Alert ID is required"
+
             });
         }
 
@@ -309,7 +370,10 @@ async function getAlertById(req, res) {
         } = await supabaseAdmin
             .from("alerts")
             .select("*")
-            .eq("id", alertId)
+            .eq(
+                "id",
+                alertId
+            )
             .eq(
                 "organization_id",
                 organizationId
@@ -325,9 +389,15 @@ async function getAlertById(req, res) {
             );
 
             return res.status(500).json({
+
                 success: false,
-                message: "Failed to load alert",
-                error: error.message
+
+                message:
+                    "Failed to load alert",
+
+                error:
+                    error.message
+
             });
         }
 
@@ -335,8 +405,12 @@ async function getAlertById(req, res) {
         if (!data) {
 
             return res.status(404).json({
+
                 success: false,
-                message: "Alert not found"
+
+                message:
+                    "Alert not found"
+
             });
         }
 
@@ -375,14 +449,24 @@ async function getAlertById(req, res) {
 
 async function createAlert(req, res) {
 
-    console.log("==========================================");
-    console.log("FUELGAP - CREATE ALERT");
-    console.log("==========================================");
+    console.log(
+        "=========================================="
+    );
+
+    console.log(
+        "FUELGAP - CREATE ALERT"
+    );
+
+    console.log(
+        "=========================================="
+    );
 
     try {
 
         const applicationUser =
-            await getAuthenticatedApplicationUser(req);
+            await getAuthenticatedApplicationUser(
+                req
+            );
 
         const organizationId =
             getOrganizationId(
@@ -394,8 +478,12 @@ async function createAlert(req, res) {
         if (!organizationId) {
 
             return res.status(400).json({
+
                 success: false,
-                message: "Organization ID not found"
+
+                message:
+                    "Organization ID not found"
+
             });
         }
 
@@ -407,9 +495,12 @@ async function createAlert(req, res) {
         ) {
 
             return res.status(403).json({
+
                 success: false,
+
                 message:
                     "You do not have permission to create alerts"
+
             });
         }
 
@@ -430,18 +521,23 @@ async function createAlert(req, res) {
         if (!title || !message) {
 
             return res.status(400).json({
+
                 success: false,
+
                 message:
                     "Alert title and message are required"
+
             });
         }
 
 
         const allowedSeverities = [
+
             "info",
             "warning",
             "high",
             "critical"
+
         ];
 
 
@@ -504,9 +600,15 @@ async function createAlert(req, res) {
             );
 
             return res.status(500).json({
+
                 success: false,
-                message: "Failed to create alert",
-                error: error.message
+
+                message:
+                    "Failed to create alert",
+
+                error:
+                    error.message
+
             });
         }
 
@@ -551,31 +653,17 @@ async function createAlert(req, res) {
 /* =========================================================
    CREATE SYSTEM GAP ALERT
 ========================================================
-   This function is used automatically by gapController.js.
+   Used automatically by gapController.js.
 
-   It:
-   - validates required information
-   - prevents duplicate alerts for the same gap
-   - creates the alert inside the correct organization
-========================================================= */
+   Supports both:
+   - camelCase
+   - snake_case
 
-      /* =========================================================
-   CREATE SYSTEM GAP ALERT
-========================================================
-   This function is used automatically by gapController.js.
-
-   It:
-   - accepts camelCase and snake_case field names
-   - validates required information
-   - prevents duplicate alerts for the same gap
-   - creates the alert inside the correct organization
+   This is important because buildGapAlert()
+   currently sends snake_case values.
 ========================================================= */
 
 async function createSystemGapAlert({
-
-    /* -----------------------------------------------------
-       SUPPORT BOTH FORMATS
-    ----------------------------------------------------- */
 
     organizationId,
     organization_id,
@@ -601,14 +689,22 @@ async function createSystemGapAlert({
 
 }) {
 
-    console.log("==========================================");
-    console.log("FUELGAP - CREATE SYSTEM GAP ALERT");
-    console.log("==========================================");
+    console.log(
+        "=========================================="
+    );
+
+    console.log(
+        "FUELGAP - CREATE SYSTEM GAP ALERT"
+    );
+
+    console.log(
+        "=========================================="
+    );
 
 
-    /* -----------------------------------------------------
+    /* -------------------------------------------------
        NORMALIZE VALUES
-    ----------------------------------------------------- */
+    ------------------------------------------------- */
 
     const finalOrganizationId =
         organizationId ||
@@ -641,9 +737,9 @@ async function createSystemGapAlert({
         null;
 
 
-    /* -----------------------------------------------------
+    /* -------------------------------------------------
        LOG VALUES
-    ----------------------------------------------------- */
+    ------------------------------------------------- */
 
     console.log(
         "SYSTEM GAP ALERT ORGANIZATION ID:",
@@ -676,9 +772,9 @@ async function createSystemGapAlert({
     );
 
 
-    /* -----------------------------------------------------
+    /* -------------------------------------------------
        REQUIRED DATA
-    ----------------------------------------------------- */
+    ------------------------------------------------- */
 
     if (!finalOrganizationId) {
 
@@ -712,15 +808,17 @@ async function createSystemGapAlert({
     }
 
 
-    /* -----------------------------------------------------
+    /* -------------------------------------------------
        VALID SEVERITIES
-    ----------------------------------------------------- */
+    ------------------------------------------------- */
 
     const allowedSeverities = [
+
         "info",
         "warning",
         "high",
         "critical"
+
     ];
 
 
@@ -732,10 +830,10 @@ async function createSystemGapAlert({
             : "info";
 
 
-    /* -----------------------------------------------------
+    /* -------------------------------------------------
        CHECK FOR EXISTING ALERT
        Prevent duplicate alert for same gap
-    ----------------------------------------------------- */
+    ------------------------------------------------- */
 
     const {
         data: existingAlert,
@@ -777,9 +875,9 @@ async function createSystemGapAlert({
     }
 
 
-    /* -----------------------------------------------------
+    /* -------------------------------------------------
        CREATE ALERT
-    ----------------------------------------------------- */
+    ------------------------------------------------- */
 
     const {
         data,
@@ -844,179 +942,6 @@ async function createSystemGapAlert({
     return data;
 }
 
-    console.log("==========================================");
-    console.log("FUELGAP - CREATE SYSTEM GAP ALERT");
-    console.log("==========================================");
-
-
-    /* -------------------------------------------------
-       REQUIRED DATA
-    ------------------------------------------------- */
-
-    if (!organizationId) {
-
-        throw new Error(
-            "Organization ID is required for gap alert"
-        );
-    }
-
-
-    if (!gapId) {
-
-        throw new Error(
-            "Gap ID is required for gap alert"
-        );
-    }
-
-
-    if (!title) {
-
-        throw new Error(
-            "Gap alert title is required"
-        );
-    }
-
-
-    if (!message) {
-
-        throw new Error(
-            "Gap alert message is required"
-        );
-    }
-
-
-    /* -------------------------------------------------
-       VALID SEVERITIES
-    ------------------------------------------------- */
-
-    const allowedSeverities = [
-        "info",
-        "warning",
-        "high",
-        "critical"
-    ];
-
-
-    const finalSeverity =
-        allowedSeverities.includes(
-            severity
-        )
-            ? severity
-            : "info";
-
-
-    /* -------------------------------------------------
-       CHECK FOR EXISTING ALERT
-       Prevent duplicate alert for same gap
-    ------------------------------------------------- */
-
-    const {
-        data: existingAlert,
-        error: existingAlertError
-    } = await supabaseAdmin
-        .from("alerts")
-        .select("id")
-        .eq(
-            "organization_id",
-            organizationId
-        )
-        .eq(
-            "gap_id",
-            gapId
-        )
-        .limit(1)
-        .maybeSingle();
-
-
-    if (existingAlertError) {
-
-        console.error(
-            "CHECK EXISTING GAP ALERT ERROR:",
-            existingAlertError
-        );
-
-        throw existingAlertError;
-    }
-
-
-    if (existingAlert) {
-
-        console.log(
-            "GAP ALERT ALREADY EXISTS:",
-            existingAlert.id
-        );
-
-        return existingAlert;
-    }
-
-
-    /* -------------------------------------------------
-       CREATE ALERT
-    ------------------------------------------------- */
-
-    const {
-        data,
-        error
-    } = await supabaseAdmin
-        .from("alerts")
-        .insert({
-
-            organization_id:
-                organizationId,
-
-            station_id:
-                stationId || null,
-
-            pump_id:
-                pumpId || null,
-
-            nozzle_id:
-                nozzleId || null,
-
-            shift_id:
-                shiftId || null,
-
-            gap_id:
-                gapId || null,
-
-            type:
-                "gap_variance",
-
-            severity:
-                finalSeverity,
-
-            title,
-
-            message,
-
-            status:
-                "new"
-
-        })
-        .select()
-        .single();
-
-
-    if (error) {
-
-        console.error(
-            "CREATE SYSTEM GAP ALERT DATABASE ERROR:",
-            error
-        );
-
-        throw error;
-    }
-
-
-    console.log(
-        "SYSTEM GAP ALERT CREATED:",
-        data.id
-    );
-
-
-    return data;
-}
-
 
 /* =========================================================
    ACKNOWLEDGE ALERT
@@ -1024,14 +949,24 @@ async function createSystemGapAlert({
 
 async function acknowledgeAlert(req, res) {
 
-    console.log("==========================================");
-    console.log("FUELGAP - ACKNOWLEDGE ALERT");
-    console.log("==========================================");
+    console.log(
+        "=========================================="
+    );
+
+    console.log(
+        "FUELGAP - ACKNOWLEDGE ALERT"
+    );
+
+    console.log(
+        "=========================================="
+    );
 
     try {
 
         const applicationUser =
-            await getAuthenticatedApplicationUser(req);
+            await getAuthenticatedApplicationUser(
+                req
+            );
 
         const organizationId =
             getOrganizationId(
@@ -1043,8 +978,12 @@ async function acknowledgeAlert(req, res) {
         if (!organizationId) {
 
             return res.status(400).json({
+
                 success: false,
-                message: "Organization ID not found"
+
+                message:
+                    "Organization ID not found"
+
             });
         }
 
@@ -1056,8 +995,12 @@ async function acknowledgeAlert(req, res) {
         if (!alertId) {
 
             return res.status(400).json({
+
                 success: false,
-                message: "Alert ID is required"
+
+                message:
+                    "Alert ID is required"
+
             });
         }
 
@@ -1068,7 +1011,10 @@ async function acknowledgeAlert(req, res) {
         } = await supabaseAdmin
             .from("alerts")
             .select("*")
-            .eq("id", alertId)
+            .eq(
+                "id",
+                alertId
+            )
             .eq(
                 "organization_id",
                 organizationId
@@ -1084,9 +1030,15 @@ async function acknowledgeAlert(req, res) {
             );
 
             return res.status(500).json({
+
                 success: false,
-                message: "Failed to find alert",
-                error: findError.message
+
+                message:
+                    "Failed to find alert",
+
+                error:
+                    findError.message
+
             });
         }
 
@@ -1094,8 +1046,12 @@ async function acknowledgeAlert(req, res) {
         if (!existingAlert) {
 
             return res.status(404).json({
+
                 success: false,
-                message: "Alert not found"
+
+                message:
+                    "Alert not found"
+
             });
         }
 
@@ -1117,7 +1073,10 @@ async function acknowledgeAlert(req, res) {
                     applicationUser.id
 
             })
-            .eq("id", alertId)
+            .eq(
+                "id",
+                alertId
+            )
             .eq(
                 "organization_id",
                 organizationId
@@ -1134,10 +1093,15 @@ async function acknowledgeAlert(req, res) {
             );
 
             return res.status(500).json({
+
                 success: false,
+
                 message:
                     "Failed to acknowledge alert",
-                error: error.message
+
+                error:
+                    error.message
+
             });
         }
 
@@ -1179,14 +1143,24 @@ async function acknowledgeAlert(req, res) {
 
 async function resolveAlert(req, res) {
 
-    console.log("==========================================");
-    console.log("FUELGAP - RESOLVE ALERT");
-    console.log("==========================================");
+    console.log(
+        "=========================================="
+    );
+
+    console.log(
+        "FUELGAP - RESOLVE ALERT"
+    );
+
+    console.log(
+        "=========================================="
+    );
 
     try {
 
         const applicationUser =
-            await getAuthenticatedApplicationUser(req);
+            await getAuthenticatedApplicationUser(
+                req
+            );
 
         const organizationId =
             getOrganizationId(
@@ -1198,8 +1172,12 @@ async function resolveAlert(req, res) {
         if (!organizationId) {
 
             return res.status(400).json({
+
                 success: false,
-                message: "Organization ID not found"
+
+                message:
+                    "Organization ID not found"
+
             });
         }
 
@@ -1211,8 +1189,12 @@ async function resolveAlert(req, res) {
         if (!alertId) {
 
             return res.status(400).json({
+
                 success: false,
-                message: "Alert ID is required"
+
+                message:
+                    "Alert ID is required"
+
             });
         }
 
@@ -1223,7 +1205,10 @@ async function resolveAlert(req, res) {
         } = await supabaseAdmin
             .from("alerts")
             .select("*")
-            .eq("id", alertId)
+            .eq(
+                "id",
+                alertId
+            )
             .eq(
                 "organization_id",
                 organizationId
@@ -1239,9 +1224,15 @@ async function resolveAlert(req, res) {
             );
 
             return res.status(500).json({
+
                 success: false,
-                message: "Failed to find alert",
-                error: findError.message
+
+                message:
+                    "Failed to find alert",
+
+                error:
+                    findError.message
+
             });
         }
 
@@ -1249,8 +1240,12 @@ async function resolveAlert(req, res) {
         if (!existingAlert) {
 
             return res.status(404).json({
+
                 success: false,
-                message: "Alert not found"
+
+                message:
+                    "Alert not found"
+
             });
         }
 
@@ -1272,7 +1267,10 @@ async function resolveAlert(req, res) {
                     applicationUser.id
 
             })
-            .eq("id", alertId)
+            .eq(
+                "id",
+                alertId
+            )
             .eq(
                 "organization_id",
                 organizationId
@@ -1289,10 +1287,15 @@ async function resolveAlert(req, res) {
             );
 
             return res.status(500).json({
+
                 success: false,
+
                 message:
                     "Failed to resolve alert",
-                error: error.message
+
+                error:
+                    error.message
+
             });
         }
 
@@ -1334,14 +1337,24 @@ async function resolveAlert(req, res) {
 
 async function deleteAlert(req, res) {
 
-    console.log("==========================================");
-    console.log("FUELGAP - DELETE ALERT");
-    console.log("==========================================");
+    console.log(
+        "=========================================="
+    );
+
+    console.log(
+        "FUELGAP - DELETE ALERT"
+    );
+
+    console.log(
+        "=========================================="
+    );
 
     try {
 
         const applicationUser =
-            await getAuthenticatedApplicationUser(req);
+            await getAuthenticatedApplicationUser(
+                req
+            );
 
         const organizationId =
             getOrganizationId(
@@ -1353,8 +1366,12 @@ async function deleteAlert(req, res) {
         if (!organizationId) {
 
             return res.status(400).json({
+
                 success: false,
-                message: "Organization ID not found"
+
+                message:
+                    "Organization ID not found"
+
             });
         }
 
@@ -1366,9 +1383,12 @@ async function deleteAlert(req, res) {
         ) {
 
             return res.status(403).json({
+
                 success: false,
+
                 message:
                     "You do not have permission to delete alerts"
+
             });
         }
 
@@ -1380,8 +1400,12 @@ async function deleteAlert(req, res) {
         if (!alertId) {
 
             return res.status(400).json({
+
                 success: false,
-                message: "Alert ID is required"
+
+                message:
+                    "Alert ID is required"
+
             });
         }
 
@@ -1392,7 +1416,10 @@ async function deleteAlert(req, res) {
         } = await supabaseAdmin
             .from("alerts")
             .select("id")
-            .eq("id", alertId)
+            .eq(
+                "id",
+                alertId
+            )
             .eq(
                 "organization_id",
                 organizationId
@@ -1408,9 +1435,15 @@ async function deleteAlert(req, res) {
             );
 
             return res.status(500).json({
+
                 success: false,
-                message: "Failed to find alert",
-                error: findError.message
+
+                message:
+                    "Failed to find alert",
+
+                error:
+                    findError.message
+
             });
         }
 
@@ -1418,8 +1451,12 @@ async function deleteAlert(req, res) {
         if (!existingAlert) {
 
             return res.status(404).json({
+
                 success: false,
-                message: "Alert not found"
+
+                message:
+                    "Alert not found"
+
             });
         }
 
@@ -1429,7 +1466,10 @@ async function deleteAlert(req, res) {
         } = await supabaseAdmin
             .from("alerts")
             .delete()
-            .eq("id", alertId)
+            .eq(
+                "id",
+                alertId
+            )
             .eq(
                 "organization_id",
                 organizationId
@@ -1444,9 +1484,15 @@ async function deleteAlert(req, res) {
             );
 
             return res.status(500).json({
+
                 success: false,
-                message: "Failed to delete alert",
-                error: error.message
+
+                message:
+                    "Failed to delete alert",
+
+                error:
+                    error.message
+
             });
         }
 
