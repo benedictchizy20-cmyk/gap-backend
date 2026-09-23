@@ -21,7 +21,7 @@ const {
 
 /* =========================================================
    HELPERS
-   ========================================================= */
+========================================================= */
 
 function cleanString(value) {
     if (
@@ -64,7 +64,7 @@ function isRestrictedRole(role) {
 
 /* =========================================================
    GET APPLICATION USER
-   ========================================================= */
+========================================================= */
 
 async function getApplicationUser(
     authUserId
@@ -117,7 +117,7 @@ async function getApplicationUser(
 
 /* =========================================================
    VERIFY STATION ACCESS
-   ========================================================= */
+========================================================= */
 
 async function verifyStationAccess(
     stationId,
@@ -188,7 +188,7 @@ async function verifyStationAccess(
 
 /* =========================================================
    FIND OPENING READING FOR CLOSING READING
-   ========================================================= */
+========================================================= */
 
 async function findOpeningForClosing(
     closingReading
@@ -213,7 +213,7 @@ async function findOpeningForClosing(
             pump_id,
             nozzle_id,
             shift_id,
-            reading_value,
+            reading,
             reading_type,
             captured_at
         `)
@@ -268,7 +268,7 @@ async function findOpeningForClosing(
 
 /* =========================================================
    FIND CLOSING READING FOR OPENING READING
-   ========================================================= */
+========================================================= */
 
 async function findClosingForOpening(
     openingReading
@@ -293,7 +293,7 @@ async function findClosingForOpening(
             pump_id,
             nozzle_id,
             shift_id,
-            reading_value,
+            reading,
             reading_type,
             captured_at
         `)
@@ -348,15 +348,15 @@ async function findClosingForOpening(
 
 /* =========================================================
    FIND EXISTING GAP
-   ========================================================= */
+========================================================= */
 
 async function findExistingGap(
     stationId,
     pumpId,
     nozzleId,
     shiftId,
-    openingReading,
-    closingReading
+    openingValue,
+    closingValue
 ) {
 
     const {
@@ -383,11 +383,11 @@ async function findExistingGap(
         )
         .eq(
             "opening_reading",
-            openingReading
+            Number(openingValue)
         )
         .eq(
             "closing_reading",
-            closingReading
+            Number(closingValue)
         )
         .maybeSingle();
 
@@ -409,13 +409,20 @@ async function findExistingGap(
 
 /* =========================================================
    DETERMINE GAP STATUS
-   ========================================================= */
+========================================================= */
 
 function determineGapStatus(
     meterGap
 ) {
 
-    if (meterGap < 0) {
+    const amount =
+        Number(meterGap);
+
+    if (Number.isNaN(amount)) {
+        return "variance";
+    }
+
+    if (amount < 0) {
         return "variance";
     }
 
@@ -425,7 +432,7 @@ function determineGapStatus(
 
 /* =========================================================
    DETERMINE ALERT SEVERITY
-   ========================================================= */
+========================================================= */
 
 function determineAlertSeverity(
     meterGap
@@ -454,7 +461,7 @@ function determineAlertSeverity(
 
 /* =========================================================
    BUILD GAP ALERT
-   ========================================================= */
+========================================================= */
 
 function buildGapAlert({
     organizationId,
@@ -474,6 +481,7 @@ function buildGapAlert({
         );
 
     return {
+
         organization_id:
             organizationId,
 
@@ -513,20 +521,56 @@ function buildGapAlert({
 
 /* =========================================================
    PROCESS METER GAP
-   ========================================================= */
+   =========================================================
+   IMPORTANT:
+
+   This function supports BOTH:
+
+   A. Automatic processing from meterReadingController
+
+      readingType: "opening" / "closing"
+      reading: createdReading
+
+   B. Manual processing
+
+      openingValue
+      closingValue
+========================================================= */
 
 async function processMeterGap({
+
     organizationId,
+
     stationId,
+
     pumpId,
+
     nozzleId,
+
     shiftId,
+
     openingValue,
-    closingValue
+
+    closingValue,
+
+    readingType,
+
+    reading
+
 }) {
 
     console.log(
         "PROCESSING METER GAP"
+    );
+
+    console.log(
+        "READING TYPE:",
+        readingType
+    );
+
+    console.log(
+        "READING OBJECT:",
+        reading
     );
 
     console.log(
@@ -539,18 +583,207 @@ async function processMeterGap({
         closingValue
     );
 
+
+    /* =====================================================
+       VERIFY STATION ACCESS
+    ===================================================== */
+
+    await verifyStationAccess(
+        stationId,
+        organizationId
+    );
+
+
+    let finalOpeningValue =
+        openingValue;
+
+    let finalClosingValue =
+        closingValue;
+
+    let openingReadingRecord =
+        null;
+
+    let closingReadingRecord =
+        null;
+
+
+    /* =====================================================
+       AUTOMATIC CLOSING READING
+    ===================================================== */
+
+    if (
+        readingType === "closing" &&
+        reading
+    ) {
+
+        console.log(
+            "AUTOMATIC GAP PROCESSING FOR CLOSING READING"
+        );
+
+
+        closingReadingRecord =
+            reading;
+
+
+        openingReadingRecord =
+            await findOpeningForClosing(
+                reading
+            );
+
+
+        if (!openingReadingRecord) {
+
+            console.log(
+                "NO MATCHING OPENING READING FOUND"
+            );
+
+            return null;
+        }
+
+
+        finalOpeningValue =
+            openingReadingRecord.reading;
+
+        finalClosingValue =
+            reading.reading;
+
+
+        console.log(
+            "MATCHED OPENING READING:",
+            openingReadingRecord
+        );
+
+        console.log(
+            "CLOSING READING:",
+            reading
+        );
+    }
+
+
+    /* =====================================================
+       AUTOMATIC OPENING READING
+
+       This handles the case where a closing reading
+       already exists before the opening reading is
+       processed.
+    ===================================================== */
+
+    if (
+        readingType === "opening" &&
+        reading
+    ) {
+
+        console.log(
+            "AUTOMATIC GAP PROCESSING FOR OPENING READING"
+        );
+
+
+        openingReadingRecord =
+            reading;
+
+
+        closingReadingRecord =
+            await findClosingForOpening(
+                reading
+            );
+
+
+        if (!closingReadingRecord) {
+
+            console.log(
+                "NO MATCHING CLOSING READING FOUND"
+            );
+
+            return null;
+        }
+
+
+        finalOpeningValue =
+            reading.reading;
+
+        finalClosingValue =
+            closingReadingRecord.reading;
+
+
+        console.log(
+            "OPENING READING:",
+            reading
+        );
+
+        console.log(
+            "MATCHED CLOSING READING:",
+            closingReadingRecord
+        );
+    }
+
+
+    /* =====================================================
+       CONVERT VALUES TO NUMBERS
+    ===================================================== */
+
+    finalOpeningValue =
+        Number(
+            finalOpeningValue
+        );
+
+    finalClosingValue =
+        Number(
+            finalClosingValue
+        );
+
+
+    console.log(
+        "FINAL OPENING VALUE:",
+        finalOpeningValue
+    );
+
+    console.log(
+        "FINAL CLOSING VALUE:",
+        finalClosingValue
+    );
+
+
+    /* =====================================================
+       VALIDATE VALUES
+    ===================================================== */
+
+    if (
+        Number.isNaN(
+            finalOpeningValue
+        ) ||
+        Number.isNaN(
+            finalClosingValue
+        )
+    ) {
+
+        throw new Error(
+            "Opening or closing meter reading is invalid"
+        );
+    }
+
+
+    /* =====================================================
+       CALCULATE GAP
+    ===================================================== */
+
     const meterGap =
         Number(
             (
-                Number(closingValue) -
-                Number(openingValue)
+                finalClosingValue -
+                finalOpeningValue
             ).toFixed(2)
         );
+
 
     console.log(
         "CALCULATED METER GAP:",
         meterGap
     );
+
+
+    /* =====================================================
+       DETERMINE STATUS
+    ===================================================== */
 
     const gapStatus =
         determineGapStatus(
@@ -559,18 +792,25 @@ async function processMeterGap({
 
 
     /* =====================================================
-       CHECK FOR DUPLICATE GAP
-       ===================================================== */
+       CHECK DUPLICATE GAP
+    ===================================================== */
 
     const existingGap =
         await findExistingGap(
+
             stationId,
+
             pumpId,
+
             nozzleId,
+
             shiftId,
-            openingValue,
-            closingValue
+
+            finalOpeningValue,
+
+            finalClosingValue
         );
+
 
     if (existingGap) {
 
@@ -584,18 +824,15 @@ async function processMeterGap({
 
 
     /* =====================================================
-       VERIFY STATION ACCESS
-       ===================================================== */
-
-    await verifyStationAccess(
-        stationId,
-        organizationId
-    );
-
-
-    /* =====================================================
        CREATE GAP
-       ===================================================== */
+
+       IMPORTANT:
+       DO NOT INSERT gap_amount.
+
+       PostgreSQL generates gap_amount using:
+
+       closing_reading - opening_reading
+    ===================================================== */
 
     const {
         data: createdGap,
@@ -620,10 +857,10 @@ async function processMeterGap({
                 shiftId,
 
             opening_reading:
-                openingValue,
+                finalOpeningValue,
 
             closing_reading:
-                closingValue,
+                finalClosingValue,
 
             expected_sales:
                 0,
@@ -638,6 +875,7 @@ async function processMeterGap({
         .select("*")
         .single();
 
+
     if (gapError) {
 
         console.error(
@@ -650,6 +888,7 @@ async function processMeterGap({
         );
     }
 
+
     console.log(
         "GAP CREATED SUCCESSFULLY:",
         createdGap
@@ -658,7 +897,10 @@ async function processMeterGap({
 
     /* =====================================================
        CREATE AUTOMATIC SYSTEM ALERT
-       ===================================================== */
+
+       KEEPING YOUR EXISTING
+       createSystemGapAlert()
+    ===================================================== */
 
     try {
 
@@ -678,31 +920,39 @@ async function processMeterGap({
                 gapId:
                     createdGap.id,
 
-                openingValue,
+                openingValue:
+                    finalOpeningValue,
 
-                closingValue,
+                closingValue:
+                    finalClosingValue,
 
                 meterGap
+
             });
+
 
         console.log(
             "CREATING SYSTEM GAP ALERT"
         );
+
 
         const systemAlert =
             await createSystemGapAlert(
                 alertData
             );
 
+
         console.log(
             "SYSTEM GAP ALERT CREATED:",
             systemAlert?.id
         );
 
+
         console.log(
             "SYSTEM GAP ALERT RESULT:",
             systemAlert
         );
+
 
     } catch (alertError) {
 
@@ -712,8 +962,8 @@ async function processMeterGap({
         );
 
         /*
-         * Do not fail the meter-gap creation
-         * if alert creation fails.
+         * Do not fail the gap creation if
+         * alert creation fails.
          */
     }
 
@@ -724,7 +974,7 @@ async function processMeterGap({
 
 /* =========================================================
    GET ALL GAPS
-   ========================================================= */
+========================================================= */
 
 async function getGaps(req, res) {
 
@@ -738,12 +988,16 @@ async function getGaps(req, res) {
             req.user?.id ||
             req.user?.auth_user_id;
 
+
         if (!authUserId) {
 
             return res.status(401).json({
+
                 success: false,
+
                 message:
                     "Authentication required"
+
             });
         }
 
@@ -753,8 +1007,10 @@ async function getGaps(req, res) {
                 authUserId
             );
 
+
         const organizationId =
             appUser.organization_id;
+
 
         console.log(
             "AUTHENTICATED USER:",
@@ -771,19 +1027,6 @@ async function getGaps(req, res) {
             appUser.role
         );
 
-
-        /* =================================================
-           GET GAPS
-
-           IMPORTANT:
-           Use select("*") here.
-
-           The previous query requested:
-               nozzles.fuel_type
-
-           but the current nozzles table does not
-           contain fuel_type.
-           ================================================= */
 
         const {
             data: gaps,
@@ -802,6 +1045,7 @@ async function getGaps(req, res) {
                 }
             );
 
+
         if (error) {
 
             console.error(
@@ -810,11 +1054,15 @@ async function getGaps(req, res) {
             );
 
             return res.status(500).json({
+
                 success: false,
+
                 message:
                     "Unable to retrieve gaps",
+
                 error:
                     error.message
+
             });
         }
 
@@ -833,6 +1081,7 @@ async function getGaps(req, res) {
                 gaps || []
 
         });
+
 
     } catch (error) {
 
@@ -856,7 +1105,7 @@ async function getGaps(req, res) {
 
 /* =========================================================
    GET GAP BY ID
-   ========================================================= */
+========================================================= */
 
 async function getGapById(
     req,
@@ -873,12 +1122,16 @@ async function getGapById(
             req.user?.id ||
             req.user?.auth_user_id;
 
+
         if (!authUserId) {
 
             return res.status(401).json({
+
                 success: false,
+
                 message:
                     "Authentication required"
+
             });
         }
 
@@ -888,19 +1141,15 @@ async function getGapById(
                 authUserId
             );
 
+
         const organizationId =
             appUser.organization_id;
+
 
         const {
             id
         } = req.params;
 
-
-        /* =================================================
-           IMPORTANT:
-           Use select("*") because the nozzles table
-           does not contain fuel_type.
-           ================================================= */
 
         const {
             data: gap,
@@ -917,6 +1166,7 @@ async function getGapById(
                 organizationId
             )
             .maybeSingle();
+
 
         if (error) {
 
@@ -961,6 +1211,7 @@ async function getGapById(
 
         });
 
+
     } catch (error) {
 
         console.error(
@@ -983,7 +1234,7 @@ async function getGapById(
 
 /* =========================================================
    CREATE GAP MANUALLY
-   ========================================================= */
+========================================================= */
 
 async function createGap(
     req,
@@ -999,6 +1250,7 @@ async function createGap(
         const authUserId =
             req.user?.id ||
             req.user?.auth_user_id;
+
 
         if (!authUserId) {
 
@@ -1018,6 +1270,7 @@ async function createGap(
                 authUserId
             );
 
+
         const organizationId =
             appUser.organization_id;
 
@@ -1031,10 +1284,6 @@ async function createGap(
             closing_reading
         } = req.body;
 
-
-        /* =================================================
-           VALIDATION
-           ================================================= */
 
         if (
             !station_id ||
@@ -1059,15 +1308,24 @@ async function createGap(
 
 
         const openingValue =
-            Number(opening_reading);
+            Number(
+                opening_reading
+            );
+
 
         const closingValue =
-            Number(closing_reading);
+            Number(
+                closing_reading
+            );
 
 
         if (
-            Number.isNaN(openingValue) ||
-            Number.isNaN(closingValue)
+            Number.isNaN(
+                openingValue
+            ) ||
+            Number.isNaN(
+                closingValue
+            )
         ) {
 
             return res.status(400).json({
@@ -1081,19 +1339,11 @@ async function createGap(
         }
 
 
-        /* =================================================
-           VERIFY STATION
-           ================================================= */
-
         await verifyStationAccess(
             station_id,
             organizationId
         );
 
-
-        /* =================================================
-           PROCESS GAP
-           ================================================= */
 
         const createdGap =
             await processMeterGap({
@@ -1131,6 +1381,7 @@ async function createGap(
 
         });
 
+
     } catch (error) {
 
         console.error(
@@ -1153,7 +1404,7 @@ async function createGap(
 
 /* =========================================================
    GET LATEST CLOSING READING
-   ========================================================= */
+========================================================= */
 
 async function getLatestClosingReading(
     stationId,
@@ -1173,7 +1424,7 @@ async function getLatestClosingReading(
             pump_id,
             nozzle_id,
             shift_id,
-            reading_value,
+            reading,
             reading_type,
             captured_at
         `)
@@ -1206,6 +1457,7 @@ async function getLatestClosingReading(
         .limit(1)
         .maybeSingle();
 
+
     if (error) {
 
         console.error(
@@ -1218,13 +1470,14 @@ async function getLatestClosingReading(
         );
     }
 
+
     return data;
 }
 
 
 /* =========================================================
    DELETE GAP
-   ========================================================= */
+========================================================= */
 
 async function deleteGap(
     req,
@@ -1240,6 +1493,7 @@ async function deleteGap(
         const authUserId =
             req.user?.id ||
             req.user?.auth_user_id;
+
 
         if (!authUserId) {
 
@@ -1259,15 +1513,12 @@ async function deleteGap(
                 authUserId
             );
 
+
         const role =
             normalizeRole(
                 appUser.role
             );
 
-
-        /* =================================================
-           ONLY MANAGEMENT CAN DELETE
-           ================================================= */
 
         if (
             ![
@@ -1401,6 +1652,7 @@ async function deleteGap(
 
         });
 
+
     } catch (error) {
 
         console.error(
@@ -1423,7 +1675,7 @@ async function deleteGap(
 
 /* =========================================================
    EXPORTS
-   ========================================================= */
+========================================================= */
 
 module.exports = {
 
