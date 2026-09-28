@@ -130,6 +130,7 @@ const loadUserProfile = async (
                         full_name,
                         email,
                         organization_id,
+                         station_id,
                         role,
                         is_active
                     `)
@@ -666,6 +667,7 @@ const register = async (req, res) => {
                     full_name,
                     email,
                     organization_id,
+                     station_id,
                     role,
                     is_active
                 `)
@@ -997,6 +999,7 @@ const login = async (req, res) => {
                     full_name,
                     email,
                     organization_id,
+                     station_id,
                     role,
                     is_active
                 `)
