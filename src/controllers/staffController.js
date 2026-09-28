@@ -4,6 +4,7 @@
    SUPABASE AUTH + USERS TABLE
    HTTPONLY COOKIE SESSION
    STATION ASSIGNMENT ENABLED
+   MANAGER STATION SCOPING
 ========================================================= */
 
 const supabaseAdmin = require("../config/supabaseAdmin");
@@ -18,6 +19,18 @@ const ALLOWED_ROLES = [
     "manager",
     "attendant"
 ];
+
+
+/* =========================================================
+   HELPER - CHECK MANAGER
+========================================================= */
+
+const isManager = (req) => {
+
+    return String(
+        req.userRole || ""
+    ).toLowerCase().trim() === "manager";
+};
 
 
 /* =========================================================
@@ -60,6 +73,7 @@ const verifyStation = async (
 ) => {
 
     if (!stationId) {
+
         return {
             valid: true,
             station: null
@@ -67,6 +81,7 @@ const verifyStation = async (
     }
 
     if (!isValidUUID(stationId)) {
+
         return {
             valid: false,
             message: "Invalid station ID"
@@ -126,6 +141,36 @@ const verifyStation = async (
     return {
         valid: true,
         station
+    };
+};
+
+
+/* =========================================================
+   HELPER - REQUIRE MANAGER STATION
+========================================================= */
+
+const requireManagerStation = (req) => {
+
+    if (!isManager(req)) {
+
+        return {
+            valid: true
+        };
+    }
+
+    if (!req.stationId) {
+
+        return {
+            valid: false,
+            message:
+                "Your manager account is not assigned to a station"
+        };
+    }
+
+    return {
+        valid: true,
+        stationId:
+            String(req.stationId).trim()
     };
 };
 
@@ -201,9 +246,11 @@ const createStaff = async (req, res) => {
                 : null;
 
         const cleanRole =
-            String(role).trim().toLowerCase();
+            String(role)
+                .trim()
+                .toLowerCase();
 
-        const cleanStationId =
+        let cleanStationId =
             station_id
                 ? String(station_id).trim()
                 : null;
@@ -279,6 +326,53 @@ const createStaff = async (req, res) => {
                 message:
                     "Owner accounts cannot be created through staff management"
             });
+        }
+
+
+        /* ---------------------------------------------
+           MANAGER STATION SECURITY
+        --------------------------------------------- */
+
+        if (isManager(req)) {
+
+            const managerStation =
+                requireManagerStation(req);
+
+            if (!managerStation.valid) {
+
+                return res.status(403).json({
+                    success: false,
+                    message:
+                        managerStation.message
+                });
+            }
+
+
+            /*
+               A manager can only create staff
+               for their own assigned station.
+            */
+
+            if (
+                cleanStationId &&
+                cleanStationId !==
+                    managerStation.stationId
+            ) {
+
+                return res.status(403).json({
+                    success: false,
+                    message:
+                        "Managers can only assign staff to their own station"
+                });
+            }
+
+
+            /*
+               Force the manager's own station.
+            */
+
+            cleanStationId =
+                managerStation.stationId;
         }
 
 
@@ -380,11 +474,13 @@ const createStaff = async (req, res) => {
         } =
             await supabaseAdmin.auth.admin.createUser({
 
-                email: cleanEmail,
+                email:
+                    cleanEmail,
 
                 password,
 
-                email_confirm: true,
+                email_confirm:
+                    true,
 
                 user_metadata: {
 
@@ -711,6 +807,39 @@ const createStaffLogin = async (req, res) => {
         }
 
 
+        /* ---------------------------------------------
+           MANAGER STATION SECURITY
+        --------------------------------------------- */
+
+        if (isManager(req)) {
+
+            const managerStation =
+                requireManagerStation(req);
+
+            if (!managerStation.valid) {
+
+                return res.status(403).json({
+                    success: false,
+                    message:
+                        managerStation.message
+                });
+            }
+
+
+            if (
+                String(staff.station_id) !==
+                managerStation.stationId
+            ) {
+
+                return res.status(403).json({
+                    success: false,
+                    message:
+                        "Managers can only manage staff from their assigned station"
+                });
+            }
+        }
+
+
         if (staff.role === "owner") {
 
             return res.status(403).json({
@@ -1002,11 +1131,25 @@ const getStaff = async (req, res) => {
         }
 
 
-        const {
-            data: staff,
-            error
-        } =
-            await supabaseAdmin
+        /* ---------------------------------------------
+           MANAGER STATION SECURITY
+        --------------------------------------------- */
+
+        const managerStation =
+            requireManagerStation(req);
+
+        if (!managerStation.valid) {
+
+            return res.status(403).json({
+                success: false,
+                message:
+                    managerStation.message
+            });
+        }
+
+
+        let query =
+            supabaseAdmin
                 .from("users")
                 .select(`
                     id,
@@ -1032,13 +1175,37 @@ const getStaff = async (req, res) => {
                 .eq(
                     "organization_id",
                     organizationId
-                )
-                .order(
-                    "created_at",
-                    {
-                        ascending: false
-                    }
                 );
+
+
+        /*
+           OWNER / ADMIN:
+           See all staff in organization.
+
+           MANAGER:
+           See only staff assigned to
+           manager's station.
+        */
+
+        if (isManager(req)) {
+
+            query = query.eq(
+                "station_id",
+                managerStation.stationId
+            );
+        }
+
+
+        const {
+            data: staff,
+            error
+        } =
+            await query.order(
+                "created_at",
+                {
+                    ascending: false
+                }
+            );
 
 
         if (error) {
@@ -1121,11 +1288,21 @@ const getStaffById = async (req, res) => {
         }
 
 
-        const {
-            data: staff,
-            error
-        } =
-            await supabaseAdmin
+        const managerStation =
+            requireManagerStation(req);
+
+        if (!managerStation.valid) {
+
+            return res.status(403).json({
+                success: false,
+                message:
+                    managerStation.message
+            });
+        }
+
+
+        let query =
+            supabaseAdmin
                 .from("users")
                 .select(`
                     id,
@@ -1155,8 +1332,23 @@ const getStaffById = async (req, res) => {
                 .eq(
                     "organization_id",
                     organizationId
-                )
-                .maybeSingle();
+                );
+
+
+        if (isManager(req)) {
+
+            query = query.eq(
+                "station_id",
+                managerStation.stationId
+            );
+        }
+
+
+        const {
+            data: staff,
+            error
+        } =
+            await query.maybeSingle();
 
 
         if (error) {
@@ -1260,14 +1452,28 @@ const updateStaff = async (req, res) => {
 
 
         /* ---------------------------------------------
+           MANAGER STATION SECURITY
+        --------------------------------------------- */
+
+        const managerStation =
+            requireManagerStation(req);
+
+        if (!managerStation.valid) {
+
+            return res.status(403).json({
+                success: false,
+                message:
+                    managerStation.message
+            });
+        }
+
+
+        /* ---------------------------------------------
            GET EXISTING STAFF
         --------------------------------------------- */
 
-        const {
-            data: existingStaff,
-            error: existingError
-        } =
-            await supabaseAdmin
+        let existingQuery =
+            supabaseAdmin
                 .from("users")
                 .select(`
                     id,
@@ -1284,8 +1490,24 @@ const updateStaff = async (req, res) => {
                 .eq(
                     "organization_id",
                     organizationId
-                )
-                .maybeSingle();
+                );
+
+
+        if (isManager(req)) {
+
+            existingQuery =
+                existingQuery.eq(
+                    "station_id",
+                    managerStation.stationId
+                );
+        }
+
+
+        const {
+            data: existingStaff,
+            error: existingError
+        } =
+            await existingQuery.maybeSingle();
 
 
         if (existingError) {
@@ -1572,34 +1794,60 @@ const updateStaff = async (req, res) => {
                     : null;
 
 
-            if (cleanStationId) {
+            /*
+               MANAGER:
+               Cannot move staff to another station.
+            */
 
-                const stationCheck =
-                    await verifyStation(
-                        cleanStationId,
-                        organizationId
-                    );
-
+            if (isManager(req)) {
 
                 if (
-                    !stationCheck.valid
+                    cleanStationId !==
+                    managerStation.stationId
                 ) {
 
-                    return res.status(
-                        stationCheck.serverError
-                            ? 500
-                            : 400
-                    ).json({
+                    return res.status(403).json({
                         success: false,
                         message:
-                            stationCheck.message
+                            "Managers cannot move staff to another station"
                     });
                 }
+
+
+                updates.station_id =
+                    managerStation.stationId;
+
+            } else {
+
+                if (cleanStationId) {
+
+                    const stationCheck =
+                        await verifyStation(
+                            cleanStationId,
+                            organizationId
+                        );
+
+
+                    if (
+                        !stationCheck.valid
+                    ) {
+
+                        return res.status(
+                            stationCheck.serverError
+                                ? 500
+                                : 400
+                        ).json({
+                            success: false,
+                            message:
+                                stationCheck.message
+                        });
+                    }
+                }
+
+
+                updates.station_id =
+                    cleanStationId;
             }
-
-
-            updates.station_id =
-                cleanStationId;
         }
 
 
@@ -1697,11 +1945,8 @@ const updateStaff = async (req, res) => {
            UPDATE DATABASE
         --------------------------------------------- */
 
-        const {
-            data: staff,
-            error
-        } =
-            await supabaseAdmin
+        let updateQuery =
+            supabaseAdmin
                 .from("users")
                 .update(updates)
                 .eq(
@@ -1711,7 +1956,29 @@ const updateStaff = async (req, res) => {
                 .eq(
                     "organization_id",
                     organizationId
-                )
+                );
+
+
+        /*
+           Extra protection:
+           manager can only update their station.
+        */
+
+        if (isManager(req)) {
+
+            updateQuery =
+                updateQuery.eq(
+                    "station_id",
+                    managerStation.stationId
+                );
+        }
+
+
+        const {
+            data: staff,
+            error
+        } =
+            await updateQuery
                 .select(`
                     id,
                     auth_user_id,
@@ -1831,14 +2098,28 @@ const deleteStaff = async (req, res) => {
 
 
         /* ---------------------------------------------
+           MANAGER STATION SECURITY
+        --------------------------------------------- */
+
+        const managerStation =
+            requireManagerStation(req);
+
+        if (!managerStation.valid) {
+
+            return res.status(403).json({
+                success: false,
+                message:
+                    managerStation.message
+            });
+        }
+
+
+        /* ---------------------------------------------
            FIND STAFF
         --------------------------------------------- */
 
-        const {
-            data: staff,
-            error: findError
-        } =
-            await supabaseAdmin
+        let findQuery =
+            supabaseAdmin
                 .from("users")
                 .select(`
                     id,
@@ -1855,8 +2136,24 @@ const deleteStaff = async (req, res) => {
                 .eq(
                     "organization_id",
                     organizationId
-                )
-                .maybeSingle();
+                );
+
+
+        if (isManager(req)) {
+
+            findQuery =
+                findQuery.eq(
+                    "station_id",
+                    managerStation.stationId
+                );
+        }
+
+
+        const {
+            data: staff,
+            error: findError
+        } =
+            await findQuery.maybeSingle();
 
 
         if (findError) {
@@ -1905,11 +2202,8 @@ const deleteStaff = async (req, res) => {
            DEACTIVATE DATABASE PROFILE
         --------------------------------------------- */
 
-        const {
-            data: updatedStaff,
-            error
-        } =
-            await supabaseAdmin
+        let deactivateQuery =
+            supabaseAdmin
                 .from("users")
                 .update({
 
@@ -1926,7 +2220,24 @@ const deleteStaff = async (req, res) => {
                 .eq(
                     "organization_id",
                     organizationId
-                )
+                );
+
+
+        if (isManager(req)) {
+
+            deactivateQuery =
+                deactivateQuery.eq(
+                    "station_id",
+                    managerStation.stationId
+                );
+        }
+
+
+        const {
+            data: updatedStaff,
+            error
+        } =
+            await deactivateQuery
                 .select(`
                     id,
                     auth_user_id,
